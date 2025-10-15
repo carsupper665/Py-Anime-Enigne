@@ -1,0 +1,156 @@
+#main.py
+from PyQt6.QtWidgets import (
+    QMainWindow, QWidget, QHBoxLayout, 
+    QStackedWidget, QApplication, QLabel
+)
+from PyQt6.QtGui import (QFont,)
+from PyQt6.QtCore import (Qt, pyqtSlot, QThread,)
+import sys
+from ui import *
+
+import sys
+
+class Main(QMainWindow):
+    def __init__(self, level: str | int="DEBUG", save_log: bool=False, scale: int=70):
+        super().__init__()
+        self.logger = loggerFactory(logger_name="PyAnimeEngine", log_level=level, write_log=save_log).getLogger()
+        self.logger.info("⏳Starting up...")
+        self.setObjectName(self.__class__.__name__)
+        self.setWindowTitle("Anime Engine")
+        self.resize(16*scale, 9*scale)
+        self.setStyleSheet("background-color: #212121;")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        self.anime_data = None
+
+        self.toast = Toast(self)
+        self.toast.fatalTriggered.connect(self._clear_all)
+
+        try:
+
+            self.main_widget = QWidget()
+
+            self.main_layout = QHBoxLayout(self.main_widget)
+            self.main_layout.setContentsMargins(0, 0, 0, 0)
+
+            self.nav_bar = NavBar(self)
+            self.main_layout.addWidget(self.nav_bar)
+
+            self.content_widget = QStackedWidget()
+            self.main_layout.addWidget(self.content_widget)
+
+            self.load_pages()
+
+            self.set_workers()
+
+            self.nav_bar.tabChanged.connect(self.content_widget.setCurrentIndex)
+            self.nav_bar.setDisabled(True)
+
+            self.setCentralWidget(self.main_widget)
+            
+            self.logger.info("Setup wrapped. Game on.")
+
+        except Exception as e:
+            self._on_exception(e)
+
+    def set_workers(self):
+        self.gif_loader = GifLoader(self.logger)
+        self.gif_loader.reload_finished.connect(self.reload_anime_data)
+        self.gif_loader.error.connect(self._on_exception)
+        self.home_page.update_data.connect(self.gif_loader.reload)
+
+
+    @pyqtSlot(dict)
+    def reload_anime_data(self, data):
+        self.anime_data = data
+        self.logger.debug(f"Anime data reloaded")
+        self.logger.debug(f"Data: {self.anime_data}")
+        self.add_page.update_data(data, mode="replace")
+
+    def load_pages(self):
+        self.loading_page = LoadingPage(logger=self.logger)
+        self.home_page = HomePage(self)
+        self.add_page = AddPage(self, self.logger)
+        self.edit_page = EditPage(self, self.logger)
+        self.add_page.on_activated.connect(self.edit_page._update_list)
+        self.add_page.gif_closed.connect(self.edit_page._delete_gif)
+        self.edit_page.sync_gifs.connect(self.add_page.on_sync)
+        pages = [self.home_page, self.add_page, self.edit_page,self.loading_page]
+
+        for page in pages:
+            self.content_widget.addWidget(page)
+            if hasattr(page, "on_exception"):
+                page.on_exception.connect(self._on_exception)
+            if hasattr(page, "toast"):
+                page.toast.connect(self._toast)
+        self.content_widget.setCurrentIndex(len(pages)-1)
+
+        self.loading_thread = QThread()
+        self.load = LoadThread(self.logger)
+        self.load.moveToThread(self.loading_thread)
+        self.loading_thread.started.connect(self.load.load)
+        self.loading_thread.finished.connect(self.loading_thread.quit)
+        self.load.progress.connect(self.loading_page.update_progress)
+        self.load.finished.connect(self._init_finished)
+        self.loading_thread.start()
+
+
+    @pyqtSlot(dict)
+    def _toast(self, payload: dict):
+        level = payload.get("level", INFO)
+        title = payload.get("title", "Notification")
+        message = payload.get("message", "")
+        duration = payload.get("duration", 3000)
+        self.toast.show_notice(level, title, message, duration, px=self._get_x(), py=self._get_y())
+
+    def _clear_all(self):
+        self.logger.info("stopping all threads...")
+        pass
+
+    def _get_x(self):
+        return self.pos().x()
+    
+    def _get_y(self):
+        return self.pos().y()
+    
+    @pyqtSlot(dict)
+    def _init_finished(self, payload: dict):
+        self.loading_thread.quit()
+        self.loading_thread.wait()
+        # self.toast.show_notice(INFO, "Welcome!", 
+        #     message="Welcome to the PyAnime Engine.", 
+        #     )
+        self.nav_bar.setEnabled(True)
+        self.content_widget.setCurrentIndex(0)
+        self.anime_data = payload
+        self.add_page.update_data(payload, mode="replace")
+        self.logger.debug(f"Initial data loaded: {self.anime_data}")
+        self.toast.show_loading("Initializing...")
+
+
+    @pyqtSlot(Exception)
+    def _on_exception(self,e: Exception):
+        import traceback
+        exctype = type(e)
+        tb_text = "".join(traceback.TracebackException.from_exception(e).format())
+        title ="App Crash Exception"
+        self.toast.show_notice(FATAL, title, e, 60000, traceback=tb_text)
+        self.hide()
+        sys.__excepthook__(exctype, e, traceback)
+
+def main():
+    app = CrashApp(sys.argv)
+    install_global_handlers(app)
+    connect_crash_dialog(app)
+    app.setFont(QFont(r'./src/fonts'))
+    window = Main()
+    window.show()
+
+    # TODO: 建立並顯示主視窗
+    # win = MainWindow(); win.show()
+
+    sys.exit(app.exec())
+
+if __name__ == '__main__':
+    main()
+
