@@ -58,7 +58,28 @@ class Main(QMainWindow):
         self.gif_loader.reload_finished.connect(self.reload_anime_data)
         self.gif_loader.error.connect(self._on_exception)
         self.home_page.update_data.connect(self.gif_loader.reload)
+        self.home_page.removeBg.connect(self._on_rmbg)
 
+        self.rmbg_thread = RmbgThread(self.logger)
+        self.rmbg_thread.progress.connect(self.toast.update_progress)
+        self.rmbg_thread.error.connect(self._on_exception)
+        self.rmbg_thread.finished.connect(self._rmbg_finished)
+
+    @pyqtSlot(str, str) # (src_path: str, prefer: str = "auto"):
+    def _on_rmbg(self, src: str, prefer: str):
+        self.logger.debug("Removeing BG")
+        self.toast.show_loading(title="Removeing BG")
+        if prefer == "":
+            prefer = "auto"
+        self.rmbg_thread.remove_bg(src_path=src, prefer=prefer)
+
+    @pyqtSlot(dict) # {input, output, kind, frames?, manifest?}
+    def _rmbg_finished(self, payload: dict):
+        _input = payload.get("input"); _output = payload.get("output"); _kind = payload.get("kind"); _frames = payload.get("frames", None); _manifest = payload.get("manifest", None)
+        self.logger.debug(f"input: {_input}\noutput:{_output}\nkind{_kind}")
+        self.logger.debug(f"frames: {_frames}, manifest{_manifest}")
+        self.toast.show_notice(INFO, title="File Saved", message=f"input: {_input}\noutput:{_output}\nkind{_kind}", px=self._get_x(), py=self._get_y())
+        self.gif_loader.reload()
 
     @pyqtSlot(dict)
     def reload_anime_data(self, data):
@@ -127,7 +148,6 @@ class Main(QMainWindow):
         self.logger.debug(f"Initial data loaded: {self.anime_data}")
         # self.toast.show_loading("Initializing...")
 
-
     @pyqtSlot(Exception)
     def _on_exception(self,e: Exception):
         import traceback
@@ -139,15 +159,13 @@ class Main(QMainWindow):
         sys.__excepthook__(exctype, e, traceback)
 
 def main():
-    app = CrashApp(sys.argv)
+    # app = QApplication(sys.argv)
+    app = MainApp(sys.argv)
     install_global_handlers(app)
     connect_crash_dialog(app)
     app.setFont(QFont(r'./src/fonts'))
     window = Main()
     window.show()
-
-    # TODO: 建立並顯示主視窗
-    # win = MainWindow(); win.show()
 
     sys.exit(app.exec())
 

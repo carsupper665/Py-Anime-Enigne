@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 crash_logs/
 logs/
+temp/
 *.log
 
 # C extensions

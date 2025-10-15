@@ -6,7 +6,7 @@ class UnexpectedError(Exception):
 
 import sys, os, threading, asyncio, traceback, datetime, faulthandler
 from PyQt6.QtWidgets import QApplication, QMessageBox
-from PyQt6.QtCore import QObject, pyqtSignal, Qt, qInstallMessageHandler
+from PyQt6.QtCore import QObject, pyqtSignal, Qt, qInstallMessageHandler, QTimer, QTimerEvent
 from PyQt6.QtGui import QIcon
 from .toast import Toast
 
@@ -29,18 +29,24 @@ def _write_log(title: str, tb: str) -> str:
 class ErrorBus(QObject):
     error = pyqtSignal(str, str, Exception)  # title, traceback, exception instance
 
-class CrashApp(QApplication):
+class MainApp(QApplication):
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.error_bus = ErrorBus()
         self._guard = False  # 防止重入
 
-    def notify(self, receiver, event):
-        try:
-            return super().notify(receiver, event)
-        except BaseException as e:
-            self._emit("Qt event error", e)
-            return False
+    # def notify(self, receiver, event):
+    #     try:
+    #         return super().notify(receiver, event)
+    #     except RuntimeError as e:
+    #         print(f"Qt event error, receiver:{receiver}, event:{event}")
+    #         if "wrapped C/C++ object" in str(e):
+    #             return False
+    #         self._emit("Qt event error", e)
+    #         return False
+    #     except BaseException as e:
+    #         self._emit("Qt event error", e)
+    #         return False
 
     def _emit(self, title: str, e: BaseException):
         if self._guard:
@@ -50,7 +56,7 @@ class CrashApp(QApplication):
         self.error_bus.error.emit(title, tb, e)
         self._guard = False
 
-def install_global_handlers(app: CrashApp):
+def install_global_handlers(app: MainApp):
     # 1) Python 主執行緒
     def sys_hook(exctype, exc, tb):
         app._emit("Uncaught exception", exc)
@@ -90,13 +96,13 @@ def install_global_handlers(app: CrashApp):
     f = open(os.path.join(LOG_DIR, "fatal_signal.log"), "a", encoding="utf-8")
     faulthandler.enable(file=f, all_threads=True)
 
-def connect_crash_dialog(app: CrashApp):
+def connect_crash_dialog(app: MainApp):
     def on_error(title: str, tb: str, e: Exception):
         sys.__excepthook__(type(e), e, e.__traceback__)
         path = _write_log(title, tb)
         box = Toast()
         box.setWindowTitle("App Crash")
-        box.show_notice("fatal", "App Crash", f"{title}\n已寫入：\n{path}", ms=50000, allow_multiple=False, traceback=tb)
+        box.show_notice(level="fatal", title="App Crash", message=f"{title}\n已寫入：\n{path}", ms=50000, allow_multiple=False, traceback=tb)
         box.exec()
         sys.exit(1)
     app.error_bus.error.connect(on_error)

@@ -1,6 +1,6 @@
 
 # ui/toast.py
-from PyQt6.QtCore import Qt, QTimer, QElapsedTimer, QCoreApplication, pyqtSignal, QEventLoop
+from PyQt6.QtCore import Qt, QTimer, QElapsedTimer, QCoreApplication, pyqtSignal, QEventLoop, pyqtSlot
 from PyQt6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QLabel, QProgressBar, QPushButton,
     QHBoxLayout, QPlainTextEdit
@@ -58,7 +58,7 @@ class Toast(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.ToolTip)
         self._recover_flags = self.windowFlags()
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
@@ -92,7 +92,7 @@ class Toast(QDialog):
         self._tick = QTimer(self); self._tick.setInterval(16); self._tick.timeout.connect(self._update_bar)
         self._elapsed = QElapsedTimer()
         self._ms = 0
-        self._accent = "#4dff59"
+        self._accent = "#ff00ea"
         self._is_fatal = False
         self._detail_text = ""
 
@@ -122,8 +122,11 @@ class Toast(QDialog):
             "Good night, Have sweet dreams! (•̀ᴗ•́)",
         ]
 
-    def _apply_style(self):
-        self.setStyleSheet(_BASE_STYLE % {"accent": self._accent})
+    def _apply_style(self, accent=None):
+        if not accent:
+            self.setStyleSheet(_BASE_STYLE % {"accent": self._accent})
+            return
+        self.setStyleSheet(_BASE_STYLE % {"accent": accent})
 
     # ===== API =====
     def exec(self):
@@ -159,8 +162,6 @@ class Toast(QDialog):
         if text is not None:
             self.msg.setText(text)
         if v >= 100:
-            self.loading_mode = False
-            # 回到非模態狀態
             self._window_recover()
             self.finished.emit()
 
@@ -175,14 +176,16 @@ class Toast(QDialog):
         traceback: object | None = None,
         allow_multiple: bool = True,
     ):
-        if self.loading_mode:
+        # self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.ToolTip)
+        if self.loading_mode and level.lower() != "fatal":
+            twin = Toast(self.parent())
+            twin.fatalTriggered.connect(self.fatalTriggered)
+            twin.show_notice(level, title, message, ms, px, py, traceback, allow_multiple=False)
             return  # loading 狀態不接受 notice
-        # 確保非模態
-        self.setModal(False)
-        self.setWindowModality(Qt.WindowModality.NonModal)
+        # # 確保非模態
+        # self.setModal(False)
+        # self.setWindowModality(Qt.WindowModality.NonModal)
 
-        if self._is_fatal:
-            return
         if allow_multiple and self.isVisible():
             twin = Toast(self.parent())
             twin.fatalTriggered.connect(self.fatalTriggered)
@@ -191,7 +194,11 @@ class Toast(QDialog):
             return twin.show_notice(level, title, message, ms, px, py, traceback, allow_multiple=False)
 
         colors = {"info": "#38c942", "warn": "#ffbd4a", "error": "#ff5c5c", "debug": "#11a4f3", "fatal": "#ff00ea"}
-        self._accent = colors.get(level.lower(), "#11a4f3"); self._apply_style()
+        self._accent = colors.get(level.lower(), "#11a4f3")
+        _accent = colors.get(level.lower(), "#11a4f3")
+        self._apply_style(_accent)
+
+        self.ok.setText("OK")
 
         if isinstance(message, Exception):
             base = f"{message.__class__.__name__}: {message}"
@@ -209,6 +216,7 @@ class Toast(QDialog):
 
         self._is_fatal = (level.lower() == "fatal")
         if self._is_fatal:
+            self._window_recover()
             import random
             t_head = random.choice(self.fatal_heads) + "\n\n" + time.strftime("%Y-%m-%d %H:%M:%S")
             self._detail_text = f"{t_head}\n\n{self._detail_text}"
@@ -223,7 +231,7 @@ class Toast(QDialog):
         self._ms = max(200, int(ms))
         self._elapsed.restart(); self._tick.start()
         self._hide_timer.start(self._ms)
-        self.open(); self.raise_()
+        self.show()
 
     def _open_details(self):
         dlg = _DetailDialog(self.window(), self.lt.text() or "Details", self._detail_text)
@@ -247,6 +255,8 @@ class Toast(QDialog):
         self.hide()
         self.setModal(False)
         self.setWindowModality(Qt.WindowModality.NonModal)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.ToolTip)
+        self.loading_mode = False
 
     def _confirm(self):
         # loading=取消；notice=立即關閉
@@ -258,6 +268,35 @@ class Toast(QDialog):
             self.hide()
             if self._is_fatal:
                 self._do_fatal()
+
+    @pyqtSlot(dict)
+    def update_progress(self, data: dict):
+        if not self.loading_mode:
+            print(f"Cant update progress in notice mode, ID:{data.get('signalId', None)}")
+            return
+        
+        id = data.get("signalId")
+        value = data.get("value")
+        status_text = data.get("status")
+
+        if (value is None) and (status_text is None) or (id is None):
+            if id is None:
+            #    self.logger.warning("No signalId in progress data")
+                print("No signalId in progress data")
+            return
+        try:
+            if value is not None and type(value) == int:
+                self.bar.setValue(value)
+                if value >= 100:
+                    self._window_recover()
+                    self.finished.emit()
+            if status_text is not None:
+                self.msg.setText(status_text)
+            
+            # self.logger.debug(f"progress: {id}, status: {status_text}, value: {value} ")
+        except Exception as e:
+            # self.logger.error(f"UI update progress error: \n {e.with_traceback()}")
+            raise e
 
     # 可拖曳移動
     def mousePressEvent(self, e: QMouseEvent):

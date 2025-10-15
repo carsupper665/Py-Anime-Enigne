@@ -62,6 +62,11 @@ class EditPage(QWidget):
         v.addWidget(title)
         row = QHBoxLayout()
         self.g_list = QListWidget(self)
+        self.g_list.setStyleSheet("""
+            QListWidget { background:#111; border:1px solid #333; border-radius:8px; color:#ddd; }
+            QListWidget::item { padding:6px 10px; }
+            QListWidget::item:selected { background:#2a2a2a; }
+        """)
         self.g_list.itemDoubleClicked.connect(self._show_selected)
         rv = QVBoxLayout()
         rv.setContentsMargins(0, 0, 0, 0)

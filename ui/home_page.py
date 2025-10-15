@@ -1,7 +1,7 @@
 # ui/home_page.py
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QFileDialog, QSplitter,
-    QInputDialog, QMessageBox, QSlider, QStackedLayout, QWidget as QW
+    QInputDialog, QMessageBox, QSlider, QStackedLayout, QWidget as QW, QCheckBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QUrl
 from PyQt6.QtGui import QPixmap, QImageReader, QDragEnterEvent, QDropEvent, QMovie
@@ -26,6 +26,9 @@ _SAVE_STYLE = """
     QPushButton:pressed { background-color: #357ae8; }
     QPushButton:disabled { background-color: #555; color: #888; }
 """
+_BASE = """
+font-weight: 300; font-size: 14px; color: #FFFFFF; font-family: "Source Han Sans TC";
+"""
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
 
@@ -34,6 +37,7 @@ class HomePage(QWidget):
     on_exception = pyqtSignal(object)
     fileSelected = pyqtSignal(str)
     toast = pyqtSignal(dict)  # {level,title,message,duration}
+    removeBg = pyqtSignal(str, str)
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -41,6 +45,7 @@ class HomePage(QWidget):
         self._movie: QMovie | None = None
         self._current_path: str | None = None
         self.setAcceptDrops(True)
+        self.setStyleSheet(_BASE)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -138,6 +143,12 @@ class HomePage(QWidget):
         rv.setSpacing(12)
         rv.addWidget(self.drop)
         rv.addLayout(btns)
+        self.rem_bg = QCheckBox()
+        self.rem_bg.setText("remove background")
+        self.rem_bg.setStyleSheet("""
+                                  font-weight: 300; font-size: 14px; color: #FFFFFF;
+                                  """)
+        rv.addWidget(self.rem_bg)
         rv.addStretch(1)
         rv.addWidget(self.save)
 
@@ -161,6 +172,7 @@ class HomePage(QWidget):
     def _set_controls_visible(self, visible: bool):
         self.seek.setVisible(visible)
         self.ctrl_bar.setVisible(visible)
+        self.rem_bg.setVisible(not visible)
 
     # ---------- file picking ----------
     def pick_file(self):
@@ -275,18 +287,55 @@ class HomePage(QWidget):
             os.makedirs(out_dir, exist_ok=True)
             save_path = os.path.join(out_dir, name)
             if os.path.abspath(save_path) == os.path.abspath(self._current_path):
-                QMessageBox.information(self, "提示", "來源與目標相同。")
+                dlg = QMessageBox(self)
+                dlg.setWindowTitle("提示")
+                dlg.setText("來源與目標相同。")
+                dlg.setIcon(QMessageBox.Icon.Information)
+                # Apply local stylesheet so the dialog uses the same colors
+                try:
+                    dlg.setStyleSheet(_BASE)
+                except Exception:
+                    pass
+                dlg.exec()
                 return
             if os.path.exists(save_path):
-                btn = QMessageBox.question(
-                    self, "覆寫確認", f"檔案「{name}」已存在，是否覆寫？",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-                if btn != QMessageBox.StandardButton.Yes:
+                dlg = QMessageBox(self)
+                dlg.setWindowTitle("覆寫確認")
+                dlg.setText(f"檔案「{name}」已存在，是否覆寫？")
+                dlg.setIcon(QMessageBox.Icon.Question)
+                yes = dlg.addButton("是", QMessageBox.ButtonRole.YesRole)
+                no = dlg.addButton("否", QMessageBox.ButtonRole.NoRole)
+                # Apply local stylesheet so the dialog uses the same colors
+                try:
+                    dlg.setStyleSheet(_BASE)
+                except Exception:
+                    pass
+                dlg.exec()
+                if dlg.clickedButton() is not yes:
                     return
             if self._movie:
                 self._movie.stop()
+
+            if self.rem_bg.isChecked():
+
+                os.makedirs('./temp', exist_ok=True)
+                
+                temp_path = os.path.join('./temp', name)
+
+                p = name.split(".")[-1]
+                
+                shutil.copyfile(self._current_path, temp_path)
+
+                if self._movie:
+                    self._movie.start()
+                self.removeBg.emit(temp_path, p)
+                self.toast.emit({
+                    "level": "info",
+                    "title": "remove backgrund...",
+                    "message": f"Wait...",
+                    "duration": 5000,
+                })
+                return
             shutil.copyfile(self._current_path, save_path)
             if self._movie:
                 self._movie.start()
@@ -299,6 +348,9 @@ class HomePage(QWidget):
             })
         except Exception as e:
             self.on_exception.emit(e)
+
+    def _remove_bg(self):
+        pass
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)

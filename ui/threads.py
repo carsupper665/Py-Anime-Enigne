@@ -1,6 +1,20 @@
-# ./ui/threads.py
+# -*- coding: utf-8 -*-
+"""
+ui/threads.py — 背景移除整合版
+
+提供三種引擎：
+- rembg  (預設)
+- openvino  (RMBG-1.4 或 U2Net 等 IR/ONNX，環境變數 RMBG_MODEL_PATH 指向模型檔)
+- hsv   (純色背景移除，會自動估計色域，可調門檻)
+
+並支援靜態圖片與動圖/影片（逐幀抽取→去背→合成 APNG/GIF/WEBM）。
+
+相依：PyQt6, Pillow(PIL), numpy, opencv-python, (選用) openvino, rembg, ffmpeg
+"""
+
 import os
 import sys
+import io
 import time
 import tempfile
 import shutil
@@ -9,11 +23,17 @@ from dataclasses import dataclass, asdict
 from typing import List, Dict, Optional, Tuple
 from logging import Logger
 
+import numpy as np
+from PIL import Image
+
 from PyQt6.QtCore import (
     QObject, QThread, pyqtSignal, pyqtSlot, QSize, QEventLoop, QTimer
 )
 from PyQt6.QtGui import QImageReader
 
+# =============================
+# 基礎資料結構
+# =============================
 @dataclass
 class MediaInfo:
     path: str
@@ -21,7 +41,11 @@ class MediaInfo:
     height: int
     is_anim: bool
     bytes: int
-    
+
+
+# =============================
+# 載入清單 Thread
+# =============================
 class LoadThread(QObject):
     progress = pyqtSignal(dict)
     finished = pyqtSignal(dict)
@@ -73,8 +97,8 @@ class GifLoader(QObject):
         self.directory = directory
         self._exts = {".gif", ".webp", ".png", ".jpg", ".jpeg", ".apng"}
 
-        self._thread: QThread | None = None
-        self._worker: _LoaderWorker | None = None
+        self._thread: Optional[QThread] = None
+        self._worker: Optional[_LoaderWorker] = None
 
     def set_directory(self, directory: str):
         self.directory = directory
@@ -87,8 +111,13 @@ class GifLoader(QObject):
         self._start_worker()
 
     def _start_worker(self):
-        if self._thread and self._thread.isRunning():
-            return  # 忽略同時重入
+        # 防止對已刪除的 QThread 呼叫 isRunning()
+        if self._thread is not None:
+            try:
+                if self._thread.isRunning():
+                    return
+            except RuntimeError:
+                self._thread = None
         self._thread = QThread()
         self._worker = _LoaderWorker(self.directory, self._exts, self.logger)
         self._worker.moveToThread(self._thread)
@@ -105,7 +134,6 @@ class GifLoader(QObject):
     @pyqtSlot(dict)
     def _on_finished(self, payload: Dict):
         self.reload_finished.emit(payload)
-        # _thread.quit() 已在啟動處連接
 
 
 class _LoaderWorker(QObject):
@@ -154,16 +182,29 @@ class _LoaderWorker(QObject):
 
 
 # =============================
-# 去背工具（新增）
+# 去背工具 Thread（支援 rembg / openvino / hsv）
+
+# HSV 參數（可調強度）
+from dataclasses import dataclass
+
+@dataclass
+class HSVOpts:
+    tol_h: int = 10        # 基本 Hue 容忍
+    tol_s: int = 60        # 基本 Saturation 容忍
+    tol_v: int = 60        # 基本 Value 容忍
+    strength: float = 1.5  # 強度倍率（>1 更寬鬆、邊界更吃掉）
+    erode_iter: int = 1    # 侵蝕次數（吃掉亮邊）
+    dilate_iter: int = 0   # 膨脹次數
+    feather_px: float = 2.0  # 距離轉換羽化半徑（像素）
+    use_guided: bool = False  # 如有 ximgproc，可啟用 edge-aware 平滑
 # =============================
 class RmbgThread(QObject):
-    """前台可呼叫：以非阻塞方式進行去背。
-    用法：
+    """非阻塞去背：
         worker = RmbgThread(logger)
         worker.progress.connect(lambda p: ...)
         worker.finished.connect(lambda payload: ...)
         worker.error.connect(lambda e: ...)
-        worker.remove_bg(src_path, out_dir='./animes', prefer='auto')
+        worker.remove_bg(src_path, out_dir='./animes', prefer='auto', engine='rembg')
     """
 
     progress = pyqtSignal(dict)  # {signalId, value, status}
@@ -177,15 +218,22 @@ class RmbgThread(QObject):
     def __init__(self, logger: Logger):
         super().__init__()
         self.logger = logger
-        self._thread: QThread | None = None
-        self._worker: _RmbgWorker | None = None
+        self._thread: Optional[QThread] = None
+        self._worker: Optional[_RmbgWorker] = None
 
-    def remove_bg(self, src_path: str, out_dir: str = "./animes", prefer: str = "auto"):
-        """prefer: 'auto' | 'gif' | 'apng' | 'webm' | 'png'（靜態）"""
-        if self._thread and self._thread.isRunning():
-            return
+    def remove_bg(self, src_path: str, out_dir: str = "./animes",
+                  prefer: str = "auto", engine: str = "hsv"):
+        # 防止對已刪除的 QThread 呼叫 isRunning()
+        if self._thread is not None:
+            try:
+                if self._thread.isRunning():
+                    self.progress.emit({"signalId": "rmbg", "value": 100, "status": "loading model"})
+                    return
+            except RuntimeError:
+                self._thread = None
+
         self._thread = QThread()
-        self._worker = _RmbgWorker(src_path, out_dir, prefer, self.logger)
+        self._worker = _RmbgWorker(src_path, out_dir, prefer, engine, self.logger)
         self._worker.moveToThread(self._thread)
 
         # wiring
@@ -205,12 +253,19 @@ class _RmbgWorker(QObject):
     finished = pyqtSignal(dict)
     error = pyqtSignal(object)
 
-    def __init__(self, src_path: str, out_dir: str, prefer: str, logger: Logger):
+    def __init__(self, src_path: str, out_dir: str, prefer: str, engine: str, logger: Logger):
         super().__init__()
         self.src_path = src_path
         self.out_dir = out_dir
         self.prefer = prefer
+        self.engine = (engine or "rembg").lower()
         self.logger = logger
+        # 延遲載入 OpenVINO 模型（需時）
+        self._ov_compiled = None
+        # HSV 可調參數（可依需求外部暴露）
+        self.hsv_opts = HSVOpts()
+        # strength=1.5、erode_iter=1、feather_px=2.0
+        # self.hsv_opts.strength = 0.15
 
     @pyqtSlot()
     def do_remove(self):
@@ -244,34 +299,164 @@ class _RmbgWorker(QObject):
         except Exception:
             return False
 
-    def _import_rembg(self):
-        try:
-            from rembg import remove, new_session  # type: ignore
-            return remove, new_session
-        except Exception as e:
-            raise RuntimeError("rembg 未安裝，請先 `pip install rembg` 或於環境中提供。") from e
-
+    # 入口：依引擎去背單張，回傳 RGBA ndarray
     def _remove_image(self, src: str, out_dir: str) -> str:
-        remove, new_session = self._import_rembg()
         base = os.path.splitext(os.path.basename(src))[0]
         out = os.path.join(out_dir, f"{base}_rmbg.png")
-        self.progress.emit({"signalId": "rmbg", "value": 5, "status": "loading model"})
-        sess = new_session("u2net")  # 可改其他模型
-        with open(src, "rb") as f:
-            data = f.read()
-        self.progress.emit({"signalId": "rmbg", "value": 20, "status": "processing"})
-        result = remove(data, session=sess)
-        with open(out, "wb") as f:
-            f.write(result)
+        self.progress.emit({"signalId": "rmbg", "value": 5, "status": f"loading model ({self.engine})"})
+
+        if self.engine == "openvino":
+            rgba = self._remove_image_openvino(src)
+        elif self.engine == "hsv":
+            rgba = self._remove_image_hsv(src)
+        else:
+            rgba = self._remove_image_rembg(src)
+
+        Image.fromarray(rgba, mode="RGBA").save(out)
         self.progress.emit({"signalId": "rmbg", "value": 100, "status": "done"})
         return out
 
+    # ========== 三種引擎 ==========
+    def _remove_image_rembg(self, src: str) -> np.ndarray:
+        try:
+            from rembg import remove, new_session  # type: ignore
+        except Exception as e:
+            raise RuntimeError("rembg 未安裝，請先 `pip install rembg`。") from e
+        sess = new_session("u2net")  # 你可改 isnet-general / birefnet-general / isnet-anime 等
+        with open(src, "rb") as f:
+            data = f.read()
+        out_bytes = remove(data, session=sess)
+        im = Image.open(io.BytesIO(out_bytes)).convert("RGBA")
+        return np.array(im)
+
+    def _load_ov_model(self):
+        if self._ov_compiled is not None:
+            return self._ov_compiled
+        model_path = os.getenv("RMBG_MODEL_PATH", "").strip()
+        if not model_path or not os.path.exists(model_path):
+            raise RuntimeError("未找到 RMBG 模型。請設定環境變數 RMBG_MODEL_PATH 指向 RMBG-1.4.onnx 或 IR .xml。")
+        try:
+            from openvino.runtime import Core
+        except Exception as e:
+            raise RuntimeError("需要 openvino。請先 `pip install openvino`。") from e
+        core = Core()
+        model = core.read_model(model_path)
+        self._ov_compiled = core.compile_model(model, "AUTO")
+        return self._ov_compiled
+
+    def _remove_image_openvino(self, src: str) -> np.ndarray:
+        import cv2
+        compiled = self._load_ov_model()
+        im = Image.open(src).convert("RGB")
+        rgb = np.array(im)  # HWC uint8
+        h, w = rgb.shape[:2]
+
+        # 依常見 RMBG 入口尺寸（多為 1024）
+        inp_size = 1024
+        img_resized = cv2.resize(rgb, (inp_size, inp_size), interpolation=cv2.INTER_AREA)
+        x = img_resized.astype(np.float32) / 255.0
+        x = np.transpose(x, (2, 0, 1))[None, ...]  # NCHW
+
+        req = compiled.create_infer_request()
+        y = req.infer({compiled.inputs[0]: x})
+        out_any = list(y.values())[0]
+        mask = np.array(out_any).squeeze()  # HxW or 1xHxW
+
+        mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_CUBIC)
+        mask = np.clip(mask, 0.0, 1.0)
+        alpha = (mask * 255).astype(np.uint8)
+        rgba = np.dstack([rgb, alpha])
+        return rgba
+
+    def _estimate_bg_hsv_range(self, bgr: np.ndarray, pad=10, tol_h=10, tol_s=60, tol_v=60) -> Tuple[np.ndarray, np.ndarray]:
+        """從影像四邊取樣，估計純色背景的 HSV 區間。
+        - 強化通道健壯性，允許灰階/帶 alpha 的輸入。
+        - 以 strength 倍率放寬門檻，避免白邊。
+        - 扁平化後合併，避免尺寸不一致。"""
+        import cv2
+        # 標準化為 3 通道 BGR
+        if bgr.ndim == 2:
+            bgr = cv2.cvtColor(bgr, cv2.COLOR_GRAY2BGR)
+        elif bgr.shape[2] == 4:
+            bgr = bgr[:, :, :3]
+
+        H, W = bgr.shape[:2]
+        p = max(1, min(pad, H // 2 if H > 1 else 1, W // 2 if W > 1 else 1))
+
+        top    = bgr[:p, :, :].reshape(-1, 3)
+        bottom = bgr[-p:, :, :].reshape(-1, 3)
+        left   = bgr[:, :p, :].reshape(-1, 3)
+        right  = bgr[:, -p:, :].reshape(-1, 3)
+        border = np.concatenate([top, bottom, left, right], axis=0)
+        if border.size == 0:
+            border = bgr.reshape(-1, 3)
+
+        hsv = cv2.cvtColor(border.reshape(-1, 1, 3), cv2.COLOR_BGR2HSV).reshape(-1, 3)
+        h = int(np.median(hsv[:, 0]))
+        s = int(np.median(hsv[:, 1]))
+        v = int(np.median(hsv[:, 2]))
+
+        k = float(self.hsv_opts.strength)
+        th = int(round(tol_h * k))
+        ts = int(round(tol_s * k))
+        tv = int(round(tol_v * k))
+
+        low  = np.array([max(0,   h - th), max(0,   s - ts), max(0,   v - tv)], dtype=np.uint8)
+        high = np.array([min(179, h + th), min(255, s + ts), min(255, v + tv)], dtype=np.uint8)
+        return low, high
+
+    def _remove_image_hsv(self, src: str) -> np.ndarray:
+        import cv2
+        bgr = cv2.imread(src, cv2.IMREAD_UNCHANGED)
+        if bgr is None:
+            raise RuntimeError("讀圖失敗")
+        # 保證 3 通道 BGR
+        if bgr.ndim == 2:
+            bgr = cv2.cvtColor(bgr, cv2.COLOR_GRAY2BGR)
+        elif bgr.shape[2] == 4:
+            bgr = bgr[:, :, :3]
+
+        # HSV inRange（放寬門檻）
+        low, high = self._estimate_bg_hsv_range(bgr, tol_h=self.hsv_opts.tol_h,
+                                                tol_s=self.hsv_opts.tol_s,
+                                                tol_v=self.hsv_opts.tol_v)
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        bg = cv2.inRange(hsv, low, high)               # 背景=255
+
+        # 強化：先膨脹背景再侵蝕前景，吃掉亮白邊
+        if self.hsv_opts.dilate_iter > 0:
+            k = np.ones((3, 3), np.uint8)
+            bg = cv2.dilate(bg, k, iterations=self.hsv_opts.dilate_iter)
+        if self.hsv_opts.erode_iter > 0:
+            k = np.ones((3, 3), np.uint8)
+            bg = cv2.erode(bg, k, iterations=self.hsv_opts.erode_iter)
+
+        # 生成前景二值與距離羽化 alpha
+        fg_bin = cv2.bitwise_not(bg)                   # 前景=255
+        if self.hsv_opts.feather_px > 0:
+            # 距離轉換 -> 線性羽化到指定像素
+            dist = cv2.distanceTransform(fg_bin, cv2.DIST_L2, 3)
+            soft = np.clip(dist / float(self.hsv_opts.feather_px), 0.0, 1.0)
+            alpha = (soft * 255.0).astype(np.uint8)
+        else:
+            alpha = fg_bin
+
+        # 可選：guided/dt 濾波，讓 alpha 貼邊（需 ximgproc）
+        if self.hsv_opts.use_guided:
+            try:
+                import cv2.ximgproc as xip
+                guide = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+                alpha = xip.guidedFilter(guide, alpha, radius=4, eps=1e-3)
+            except Exception:
+                pass
+
+        rgba = np.dstack([bgr[..., ::-1], alpha])      # BGR->RGB + alpha
+        return rgba
+
+    # ========== 動圖/影片處理 ==========
     def _remove_anim_or_video(self, src: str, out_dir: str, prefer: str) -> dict:
         if not self._check_ffmpeg():
             raise RuntimeError("需要 ffmpeg 以處理動圖/影片。請安裝並加入 PATH。")
-
-        remove, new_session = self._import_rembg()
-        sess = new_session("u2net")
 
         base = os.path.splitext(os.path.basename(src))[0]
         tmp = tempfile.mkdtemp(prefix="rmbg_")
@@ -280,14 +465,12 @@ class _RmbgWorker(QObject):
 
         # 抽幀
         self.progress.emit({"signalId": "rmbg", "value": 5, "status": "extract frames"})
-        # 使用 png 保留 alpha
         extract_args = [
             "ffmpeg", "-y", "-i", src,
             os.path.join(frames_dir, "f_%06d.png")
         ]
         subprocess.run(extract_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
 
-        # 清單
         files = sorted([f for f in os.listdir(frames_dir) if f.lower().endswith(".png")])
         total = max(1, len(files))
 
@@ -296,21 +479,22 @@ class _RmbgWorker(QObject):
         os.makedirs(out_frames, exist_ok=True)
         for i, fname in enumerate(files, 1):
             fpath = os.path.join(frames_dir, fname)
-            with open(fpath, "rb") as fr:
-                buf = fr.read()
-            out_buf = remove(buf, session=sess)
-            with open(os.path.join(out_frames, fname), "wb") as fw:
-                fw.write(out_buf)
+            if self.engine == "openvino":
+                rgba = self._remove_image_openvino(fpath)
+            elif self.engine == "hsv":
+                rgba = self._remove_image_hsv(fpath)
+            else:
+                rgba = self._remove_image_rembg(fpath)
+            Image.fromarray(rgba, "RGBA").save(os.path.join(out_frames, fname))
             if i % 3 == 0 or i == total:
                 pct = 5 + int(80 * i / total)
                 self.progress.emit({"signalId": "rmbg", "value": pct, "status": f"frame {i}/{total}"})
 
-        # 重組：優先 APNG，其次 GIF，再者 WEBM 透明
-        prefer = prefer or "auto"
+        # 合成：優先 APNG，其次 GIF，再者 WEBM（透明）
+        prefer = (prefer or "auto").lower()
         out_path: Optional[str] = None
 
         def try_make_apng() -> Optional[str]:
-            """使用 ffmpeg 合成 APNG（需要支援 apng muxer 的 ffmpeg）。"""
             try:
                 out = os.path.join(out_dir, f"{base}_rmbg.apng")
                 args = [
@@ -323,13 +507,29 @@ class _RmbgWorker(QObject):
                 return None
 
         def try_make_gif() -> Optional[str]:
-            # GIF 僅 1-bit 透明，邊緣可能鋸齒
+            # GIF 僅 1-bit 透明，嘗試設置透明索引與 disposal
             try:
-                import imageio.v2 as imageio
-                import numpy as np
-                outs = [imageio.imread(os.path.join(out_frames, f)) for f in files]
                 out = os.path.join(out_dir, f"{base}_rmbg.gif")
-                imageio.mimsave(out, outs, format="GIF", duration=1/15)
+                frames = [Image.open(os.path.join(out_frames, f)).convert("RGBA") for f in files]
+                pal_frames: List[Image.Image] = []
+                for im in frames:
+                    alpha = im.getchannel("A")
+                    rgb   = im.convert("RGB")
+                    pal   = rgb.convert("P", palette=Image.ADAPTIVE, colors=255)
+                    # 將全透明像素標成索引0
+                    mask0 = Image.eval(alpha, lambda a: 255 if a == 0 else 0)
+                    pal.paste(0, mask=mask0)
+                    pal_frames.append(pal)
+                pal_frames[0].save(
+                    out,
+                    save_all=True,
+                    append_images=pal_frames[1:],
+                    duration=20,  # ms, 約 50fps 的 20ms/幀
+                    loop=0,
+                    transparency=0,
+                    disposal=2,
+                    optimize=False
+                )
                 return out
             except Exception:
                 return None
