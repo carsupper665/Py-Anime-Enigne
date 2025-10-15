@@ -117,15 +117,15 @@ class Main(QMainWindow):
     def _init_finished(self, payload: dict):
         self.loading_thread.quit()
         self.loading_thread.wait()
-        # self.toast.show_notice(INFO, "Welcome!", 
-        #     message="Welcome to the PyAnime Engine.", 
-        #     )
+        self.toast.show_notice(INFO, "Welcome!", 
+            message="Welcome to the PyAnime Engine.", 
+            )
         self.nav_bar.setEnabled(True)
         self.content_widget.setCurrentIndex(0)
         self.anime_data = payload
         self.add_page.update_data(payload, mode="replace")
         self.logger.debug(f"Initial data loaded: {self.anime_data}")
-        self.toast.show_loading("Initializing...")
+        # self.toast.show_loading("Initializing...")
 
 
     @pyqtSlot(Exception)
