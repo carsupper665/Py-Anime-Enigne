@@ -24,6 +24,7 @@ class Main(QMainWindow):
         self.anime_data = None
 
         self.toast = Toast(self)
+        self.toast_loading = LoadingToast(self)
         self.toast.fatalTriggered.connect(self._clear_all)
 
         try:
@@ -61,14 +62,14 @@ class Main(QMainWindow):
         self.home_page.removeBg.connect(self._on_rmbg)
 
         self.rmbg_thread = RmbgThread(self.logger)
-        self.rmbg_thread.progress.connect(self.toast.update_progress)
+        self.rmbg_thread.progress.connect(self.toast_loading.update_progress)
         self.rmbg_thread.error.connect(self._on_exception)
         self.rmbg_thread.finished.connect(self._rmbg_finished)
 
     @pyqtSlot(str, str) # (src_path: str, prefer: str = "auto"):
     def _on_rmbg(self, src: str, prefer: str):
+        self.toast_loading.show_loading(title="Removeing BG")
         self.logger.debug("Removeing BG")
-        self.toast.show_loading(title="Removeing BG")
         if prefer == "":
             prefer = "auto"
         self.rmbg_thread.remove_bg(src_path=src, prefer=prefer)
@@ -150,12 +151,16 @@ class Main(QMainWindow):
 
     @pyqtSlot(Exception)
     def _on_exception(self,e: Exception):
+        self.toast_loading.on_exception_cancel()
+        if isinstance(e, FFmpegNotFoundError):
+            self.toast.show_notice(ERROR, "FFmpeg Not Found", str(e), 10000, px=self._get_x(), py=self._get_y())
+            return
+        self.hide()
         import traceback
         exctype = type(e)
         tb_text = "".join(traceback.TracebackException.from_exception(e).format())
         title ="App Crash Exception"
         self.toast.show_notice(FATAL, title, e, 60000, traceback=tb_text)
-        self.hide()
         sys.__excepthook__(exctype, e, traceback)
 
 def main():

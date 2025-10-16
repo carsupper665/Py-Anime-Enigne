@@ -4,6 +4,10 @@ class UnexpectedError(Exception):
         self.message = message
         super().__init__(self.message)
 
+class FFmpegNotFoundError(FileNotFoundError):
+    def __init__(self, message="FFmpeg not found. Please ensure FFmpeg is installed and added to your system PATH."):
+        super().__init__(message)
+
 import sys, os, threading, asyncio, traceback, datetime, faulthandler
 from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtCore import QObject, pyqtSignal, Qt, qInstallMessageHandler, QTimer, QTimerEvent

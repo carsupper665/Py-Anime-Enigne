@@ -1,7 +1,7 @@
 # ui/__init__.py
 from .nav_bar import NavBar
 from .loading_page import LoadingPage
-from .toast import Toast
+from .toast import Toast, LoadingToast
 from .home_page import HomePage
 from .logger import loggerFactory, C
 from .ui_error import UnexpectedError, connect_crash_dialog, MainApp, install_global_handlers
@@ -21,6 +21,7 @@ __all__ = ["NavBar", "LoadingPage", "HomePage", "Toast",
            "DEBUG", "FATAL", "loggerFactory", "LoadThread",
            "AddPage", "COLOR", "GifLoader", "MediaInfo", 
            "EditPage", "connect_crash_dialog", "MainApp",
-            "install_global_handlers", "RmbgThread"
+            "install_global_handlers", "RmbgThread",
+            "LoadingToast", "FFmpegNotFoundError"
            ]
 

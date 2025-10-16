@@ -19,6 +19,7 @@ import time
 import tempfile
 import shutil
 import subprocess
+from .ui_error import FFmpegNotFoundError
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Optional, Tuple
 from logging import Logger
@@ -95,7 +96,7 @@ class GifLoader(QObject):
         super().__init__()
         self.logger = logger
         self.directory = directory
-        self._exts = {".gif", ".webp", ".png", ".jpg", ".jpeg", ".apng"}
+        self._exts = {".webp", ".gif"}
 
         self._thread: Optional[QThread] = None
         self._worker: Optional[_LoaderWorker] = None
@@ -126,10 +127,15 @@ class GifLoader(QObject):
         self._worker.finished.connect(self._on_finished)
         self._worker.finished.connect(self._thread.quit)
         self._worker.error.connect(self.error)
+        self._worker.error.connect(self.error_clear)
 
         self._thread.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._thread.deleteLater)
         self._thread.start()
+
+    @pyqtSlot(object)
+    def error_clear(self, e):
+        self._thread.quit()
 
     @pyqtSlot(dict)
     def _on_finished(self, payload: Dict):
@@ -241,12 +247,18 @@ class RmbgThread(QObject):
         self._worker.progress.connect(self.progress)
         self._worker.finished.connect(self.finished)
         self._worker.error.connect(self.error)
+        self._worker.error.connect(self.error_clear)
         self._worker.finished.connect(self._thread.quit)
 
         self._thread.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._thread.deleteLater)
         self._thread.start()
 
+    
+    @pyqtSlot(object)
+    def error_clear(self, e):
+        self._thread.quit()
+        # self._thread = None
 
 class _RmbgWorker(QObject):
     progress = pyqtSignal(dict)
@@ -264,6 +276,7 @@ class _RmbgWorker(QObject):
         self._ov_compiled = None
         # HSV 可調參數（可依需求外部暴露）
         self.hsv_opts = HSVOpts()
+        self.fps = 0
         # strength=1.5、erode_iter=1、feather_px=2.0
         # self.hsv_opts.strength = 0.15
 
@@ -302,7 +315,8 @@ class _RmbgWorker(QObject):
     # 入口：依引擎去背單張，回傳 RGBA ndarray
     def _remove_image(self, src: str, out_dir: str) -> str:
         base = os.path.splitext(os.path.basename(src))[0]
-        out = os.path.join(out_dir, f"{base}_rmbg.png")
+        tmp_png = os.path.join(out_dir, f"{base}_rmbg_tmp.png")
+        out_webp = os.path.join(out_dir, f"{base}_rmbg.webp")
         self.progress.emit({"signalId": "rmbg", "value": 5, "status": f"loading model ({self.engine})"})
 
         if self.engine == "openvino":
@@ -312,9 +326,26 @@ class _RmbgWorker(QObject):
         else:
             rgba = self._remove_image_rembg(src)
 
-        Image.fromarray(rgba, mode="RGBA").save(out)
-        self.progress.emit({"signalId": "rmbg", "value": 100, "status": "done"})
-        return out
+        Image.fromarray(rgba, "RGBA").save(tmp_png)
+
+        try:
+            subprocess.run([
+                "ffmpeg","-y","-i", tmp_png,
+                "-c:v","libwebp_anim","-lossless","1",
+                "-compression_level","9",
+                "-preset","picture","-exact",  # 無損；改用 -q:v 調體積
+                out_webp
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            os.remove(tmp_png)
+            self.progress.emit({"signalId":"rmbg","value":100,"status":"done"})
+            return out_webp
+        except Exception:
+            self.progress.emit({"signalId":"rmbg","value":100,"status":"done(png fallback)"})
+        return tmp_png
+
+        # Image.fromarray(rgba, mode="RGBA").save(out)
+        # self.progress.emit({"signalId": "rmbg", "value": 100, "status": "done"})
+        # return out
 
     # ========== 三種引擎 ==========
     def _remove_image_rembg(self, src: str) -> np.ndarray:
@@ -456,7 +487,7 @@ class _RmbgWorker(QObject):
     # ========== 動圖/影片處理 ==========
     def _remove_anim_or_video(self, src: str, out_dir: str, prefer: str) -> dict:
         if not self._check_ffmpeg():
-            raise RuntimeError("需要 ffmpeg 以處理動圖/影片。請安裝並加入 PATH。")
+            raise FFmpegNotFoundError("需要 ffmpeg 以處理動圖/影片。請安裝並加入 PATH。")
 
         base = os.path.splitext(os.path.basename(src))[0]
         tmp = tempfile.mkdtemp(prefix="rmbg_")
@@ -466,7 +497,7 @@ class _RmbgWorker(QObject):
         # 抽幀
         self.progress.emit({"signalId": "rmbg", "value": 5, "status": "extract frames"})
         extract_args = [
-            "ffmpeg", "-y", "-i", src,
+            "ffmpeg", "-y", "-i", src,"-vsync","0",
             os.path.join(frames_dir, "f_%06d.png")
         ]
         subprocess.run(extract_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
@@ -494,75 +525,79 @@ class _RmbgWorker(QObject):
         prefer = (prefer or "auto").lower()
         out_path: Optional[str] = None
 
-        def try_make_apng() -> Optional[str]:
+        # 取得 fps（失敗則 15）
+        def _probe_fps(p):
             try:
-                out = os.path.join(out_dir, f"{base}_rmbg.apng")
-                args = [
-                    "ffmpeg", "-y", "-framerate", "15", "-i", os.path.join(out_frames, "f_%06d.png"),
-                    "-plays", "0", out
-                ]
-                subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-                return out
+                r = subprocess.run(
+                    ["ffprobe","-v","error","-select_streams","v:0",
+                    "-show_entries","stream=avg_frame_rate",
+                    "-of","default=nw=1:nk=1", p],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True)
+                num,den = r.stdout.strip().split("/")
+                num,den = int(num), (int(den) if den!="0" else 1)
+                return max(1, round(num/den))
             except Exception:
-                return None
-
-        def try_make_gif() -> Optional[str]:
-            # GIF 僅 1-bit 透明，嘗試設置透明索引與 disposal
-            try:
-                out = os.path.join(out_dir, f"{base}_rmbg.gif")
-                frames = [Image.open(os.path.join(out_frames, f)).convert("RGBA") for f in files]
-                pal_frames: List[Image.Image] = []
-                for im in frames:
-                    alpha = im.getchannel("A")
-                    rgb   = im.convert("RGB")
-                    pal   = rgb.convert("P", palette=Image.ADAPTIVE, colors=255)
-                    # 將全透明像素標成索引0
-                    mask0 = Image.eval(alpha, lambda a: 255 if a == 0 else 0)
-                    pal.paste(0, mask=mask0)
-                    pal_frames.append(pal)
-                pal_frames[0].save(
-                    out,
-                    save_all=True,
-                    append_images=pal_frames[1:],
-                    duration=20,  # ms, 約 50fps 的 20ms/幀
-                    loop=0,
-                    transparency=0,
-                    disposal=2,
-                    optimize=False
-                )
-                return out
-            except Exception:
-                return None
-
-        def try_make_webm() -> Optional[str]:
-            try:
-                out = os.path.join(out_dir, f"{base}_rmbg.webm")
-                args = [
-                    "ffmpeg", "-y", "-framerate", "15", "-i", os.path.join(out_frames, "f_%06d.png"),
-                    "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-auto-alt-ref", "0", out
-                ]
-                subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-                return out
-            except Exception:
-                return None
+                return 15
+            
+        fps = _probe_fps(src)
+        self.fps = fps
 
         self.progress.emit({"signalId": "rmbg", "value": 90, "status": "encode"})
 
-        if prefer == "apng" or prefer == "auto":
-            out_path = try_make_apng()
-        if not out_path and (prefer == "gif" or prefer == "auto"):
-            out_path = try_make_gif()
-        if not out_path and (prefer in ("webm", "auto")):
-            out_path = try_make_webm()
+        # "-c:v","libwebp_anim","-lossless","1",
+        #         "-compression_level","9",
+        #         "-preset","picture","-exact",
 
-        if not out_path:
-            # 退而求其次：輸出去背後的逐幀資料夾
-            out_path = os.path.join(out_dir, f"{base}_rmbg_frames")
-            if os.path.exists(out_path):
-                shutil.rmtree(out_path)
-            shutil.copytree(out_frames, out_path)
+        out_webp = os.path.join(out_dir, f"{base}_rmbg547.webp")
+        subprocess.run([
+        "ffmpeg","-y","-framerate", str(fps),
+        "-i", os.path.join(out_frames,"f_%06d.png"),
+        "-c:v","libwebp_anim",
+        "-pix_fmt","yuva420p",   # 保透明
+        "-loop","0",            # 無限循環
+        "-q:v","75",             # 或改 -lossless 1
+        out_webp
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+
+        # if not out_path:
+        #     # 退而求其次：輸出去背後的逐幀資料夾
+        #     out_path = os.path.join(out_dir, f"{base}_rmbg_frames")
+        #     if os.path.exists(out_path):
+        #         shutil.rmtree(out_path)
+        #     shutil.copytree(out_frames, out_path)
 
         # 清理暫存
         shutil.rmtree(tmp, ignore_errors=True)
+        # os.remove(f"./animes/{base}_rmbg_frames",)
         self.progress.emit({"signalId": "rmbg", "value": 100, "status": "done"})
         return {"input": src, "output": out_path, "kind": "anim", "frames": len(files)}
+    
+# def _test_rm(path):
+#     n = 0
+#     tmp = tempfile.mkdtemp(prefix="rmbg_")
+#     frames_dir = os.path.join(tmp, "frames")
+#     os.makedirs(frames_dir, exist_ok=True)
+#     print(frames_dir)
+#     extract_args = [
+#             "ffmpeg", "-y", "-i", path,"-vsync","0",
+#             os.path.join(frames_dir, "f_%06d.png")
+#         ]
+#     subprocess.run(extract_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+#     source = sorted([f for f in os.listdir(frames_dir) if f.lower().endswith(".png")])
+#       # source 為要轉存的所有圖片陣列 ( opencv 格式，色彩為 RGBA )
+#     # for i in source:                  # source 為要轉存的所有圖片陣列 ( opencv 格式，色彩為 RGBA )
+#     #     img = Image.open(frames_dir + '\\' +i)      # 轉換成 PIL 格式
+#     #     img.save(f'./gif{n}.gif')  # 儲存為 gif
+#     #     n = n + 1                     # 改變儲存的檔名編號
+
+#     output = []                       # 建立空串列
+#     for i in source:
+#         img = Image.open(frames_dir + '\\' + i)      # 轉換成 PIL 格式
+#         img = img.convert("RGBA")             # 轉換為 RGBA
+#         output.append(img)                    # 記錄每張圖片內容
+
+#     # 轉存為 gif 動畫，設定 disposal=2
+#     shutil.rmtree(tmp, ignore_errors=True)
+#     output[0].save("oxxostudio.gif", save_all=True, append_images=output[1:], duration=100, loop=0, disposal=2)
+# if __name__ == "__main__":
+#     _test_rm(r'C:\Users\car\Downloads\lixovsk-hoshimi-miyabi.gif')

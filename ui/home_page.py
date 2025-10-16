@@ -31,6 +31,7 @@ font-weight: 300; font-size: 14px; color: #FFFFFF; font-family: "Source Han Sans
 """
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
+_EXTS = {".gif", ".webp"}
 
 class HomePage(QWidget):
     update_data = pyqtSignal()
@@ -316,13 +317,14 @@ class HomePage(QWidget):
             if self._movie:
                 self._movie.stop()
 
+            p = name.split(".")[-1]
+
             if self.rem_bg.isChecked():
 
                 os.makedirs('./temp', exist_ok=True)
                 
                 temp_path = os.path.join('./temp', name)
 
-                p = name.split(".")[-1]
                 
                 shutil.copyfile(self._current_path, temp_path)
 
@@ -336,7 +338,11 @@ class HomePage(QWidget):
                     "duration": 5000,
                 })
                 return
-            shutil.copyfile(self._current_path, save_path)
+            if p in _EXTS:
+                shutil.copyfile(self._current_path, save_path)
+            else:
+                #TODO convert to webp
+                pass
             if self._movie:
                 self._movie.start()
             self.update_data.emit()
