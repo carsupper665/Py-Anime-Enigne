@@ -6,6 +6,7 @@ crash_logs/
 logs/
 temp/
 *.log
+*.onnx
 
 # C extensions
 *.so

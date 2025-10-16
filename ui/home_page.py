@@ -31,7 +31,7 @@ font-weight: 300; font-size: 14px; color: #FFFFFF; font-family: "Source Han Sans
 """
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
-_EXTS = {".gif", ".webp"}
+_EXTS = ["gif", "webp", "png"]
 
 class HomePage(QWidget):
     update_data = pyqtSignal()
@@ -342,6 +342,12 @@ class HomePage(QWidget):
                 shutil.copyfile(self._current_path, save_path)
             else:
                 #TODO convert to webp
+                self.toast.emit({
+                    "level": "warning",
+                    "title": "不支援的格式",
+                    "message": f"目前僅支援儲存為 GIF/WEBP。",
+                    "duration": 5000,
+                })
                 pass
             if self._movie:
                 self._movie.start()

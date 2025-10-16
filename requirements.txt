@@ -2,3 +2,4 @@ rembg
 PyQt6
 openvino
 opencv-contrib-python
+opencv-python

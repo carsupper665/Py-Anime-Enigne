@@ -11,7 +11,17 @@ ui/threads.py — 背景移除整合版
 
 相依：PyQt6, Pillow(PIL), numpy, opencv-python, (選用) openvino, rembg, ffmpeg
 """
-
+DEFAULTS = {
+    "border": 12,            # 取四邊厚度作背景取樣
+    "kmeans_k": 2,           # 邊框分群以避開陰影
+    "use_mahalanobis": True, # True=用馬氏距離，False=用歐氏距離
+    "morph_open_close": True,
+    "keep_largest": True,    # 只留最大前景
+    "min_keep_area": 400,
+    "near_radius_ratio": 0.35,
+    "feather_px": 2.5
+}
+import cv2
 import os
 import sys
 import io
@@ -31,6 +41,68 @@ from PyQt6.QtCore import (
     QObject, QThread, pyqtSignal, pyqtSlot, QSize, QEventLoop, QTimer
 )
 from PyQt6.QtGui import QImageReader
+def _estimate_bg_lab_from_borders(lab, border=10, k=2):
+    h, w = lab.shape[:2]
+    S = np.vstack([
+        lab[0:border, :, :].reshape(-1,3),
+        lab[h-border:h, :, :].reshape(-1,3),
+        lab[:, 0:border, :].reshape(-1,3),
+        lab[:, w-border:w, :].reshape(-1,3)
+    ]).astype(np.float32)
+
+    if k >= 2 and S.shape[0] >= k:
+        criteria = (cv2.TERM_CRITERIA_EPS+cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+        _ret, labels, centers = cv2.kmeans(S, k, None, criteria, 3, cv2.KMEANS_PP_CENTERS)
+        bg = centers[np.bincount(labels.ravel()).argmax()]
+        cluster = S[labels.ravel()==np.bincount(labels.ravel()).argmax()]
+    else:
+        bg = np.median(S, axis=0)
+        cluster = S
+
+    cov = np.cov(cluster.T) + np.eye(3)*1e-6   # 防奇異矩陣
+    inv_cov = np.linalg.inv(cov)
+    mean = bg.astype(np.float32)
+    return mean, inv_cov
+
+def _bg_mask_by_color_and_border(bgr, opts):
+    # BGR -> Lab（用 float64，後續距離與逆協方差一致）
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float64)  # cvtColor 說明見官方文件。 
+    mean, inv_cov = _estimate_bg_lab_from_borders(
+        lab, border=int(opts["border"]), k=int(opts["kmeans_k"])
+    )  # 回傳的 mean, inv_cov 已基於邊框樣本計算
+
+    H, W = lab.shape[:2]
+    X = lab.reshape(-1, 3)  # (N,3) float64
+
+    # 距離圖：Mahalanobis 或 Euclidean（二擇一）
+    if opts.get("use_mahalanobis", True):
+        # 向量化馬氏距離，避免 cv2.Mahalanobis 的 dtype 斷言
+        diff = X - mean.astype(np.float64)                   # (N,3)
+        inv_cov = inv_cov.astype(np.float64)                 # (3,3)
+        d = np.sqrt(np.einsum('ij,jk,ik->i', diff, inv_cov, diff))  # (N,)
+    else:
+        d = np.linalg.norm(X - mean.astype(np.float64), axis=1)
+
+    dist = d.reshape(H, W)
+
+    # Otsu 取閾：距離小=背景
+    dist_u8 = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    _thr, mask_bg0 = cv2.threshold(dist_u8, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    # 只保留「接觸影像邊界」的連通塊為背景
+    num, labels, stats, _ = cv2.connectedComponentsWithStats((mask_bg0 > 0).astype(np.uint8), connectivity=4)
+    touch = np.zeros(num, dtype=bool)
+    if num > 1:
+        touch[labels[0, :]] = True
+        touch[labels[-1, :]] = True
+        touch[labels[:, 0]] = True
+        touch[labels[:, -1]] = True
+
+    bg = np.zeros_like(mask_bg0)
+    for i in range(1, num):
+        if touch[i]:
+            bg[labels == i] = 255
+    return bg
 
 # =============================
 # 基礎資料結構
@@ -228,7 +300,7 @@ class RmbgThread(QObject):
         self._worker: Optional[_RmbgWorker] = None
 
     def remove_bg(self, src_path: str, out_dir: str = "./animes",
-                  prefer: str = "auto", engine: str = "hsv"):
+                  prefer: str = "auto", engine: str = "hsv"): # rembg / openvino / hsv / wand
         # 防止對已刪除的 QThread 呼叫 isRunning()
         if self._thread is not None:
             try:
@@ -278,7 +350,7 @@ class _RmbgWorker(QObject):
         self.hsv_opts = HSVOpts()
         self.fps = 0
         # strength=1.5、erode_iter=1、feather_px=2.0
-        # self.hsv_opts.strength = 0.15
+        self.hsv_opts.strength = 1.5
 
     @pyqtSlot()
     def do_remove(self):
@@ -312,7 +384,7 @@ class _RmbgWorker(QObject):
         except Exception:
             return False
 
-    # 入口：依引擎去背單張，回傳 RGBA ndarray
+    # OLD
     def _remove_image(self, src: str, out_dir: str) -> str:
         base = os.path.splitext(os.path.basename(src))[0]
         tmp_png = os.path.join(out_dir, f"{base}_rmbg_tmp.png")
@@ -323,6 +395,8 @@ class _RmbgWorker(QObject):
             rgba = self._remove_image_openvino(src)
         elif self.engine == "hsv":
             rgba = self._remove_image_hsv(src)
+        elif self.engine == "wand":
+            rgba = self._remove_image_magicwand(src)
         else:
             rgba = self._remove_image_rembg(src)
 
@@ -365,7 +439,10 @@ class _RmbgWorker(QObject):
             return self._ov_compiled
         model_path = os.getenv("RMBG_MODEL_PATH", "").strip()
         if not model_path or not os.path.exists(model_path):
-            raise RuntimeError("未找到 RMBG 模型。請設定環境變數 RMBG_MODEL_PATH 指向 RMBG-1.4.onnx 或 IR .xml。")
+            if os.path.exists("./models/model.onnx"):
+                model_path = "./models/model.onnx"
+            else:
+                raise FFmpegNotFoundError("未找到 RMBG 模型。請設定環境變數 RMBG_MODEL_PATH 指向 RMBG-1.4.onnx 或 IR .xml。")
         try:
             from openvino.runtime import Core
         except Exception as e:
@@ -376,7 +453,7 @@ class _RmbgWorker(QObject):
         return self._ov_compiled
 
     def _remove_image_openvino(self, src: str) -> np.ndarray:
-        import cv2
+        
         compiled = self._load_ov_model()
         im = Image.open(src).convert("RGB")
         rgb = np.array(im)  # HWC uint8
@@ -400,10 +477,7 @@ class _RmbgWorker(QObject):
         return rgba
 
     def _estimate_bg_hsv_range(self, bgr: np.ndarray, pad=10, tol_h=10, tol_s=60, tol_v=60) -> Tuple[np.ndarray, np.ndarray]:
-        """從影像四邊取樣，估計純色背景的 HSV 區間。
-        - 強化通道健壯性，允許灰階/帶 alpha 的輸入。
-        - 以 strength 倍率放寬門檻，避免白邊。
-        - 扁平化後合併，避免尺寸不一致。"""
+       
         import cv2
         # 標準化為 3 通道 BGR
         if bgr.ndim == 2:
@@ -484,6 +558,56 @@ class _RmbgWorker(QObject):
         rgba = np.dstack([bgr[..., ::-1], alpha])      # BGR->RGB + alpha
         return rgba
 
+
+    # --- 修改: 去背，接受 seed_xy；None 則退回四角 ---
+    def _remove_image_magicwand(self, src: str, opts: Optional[dict] = None) -> np.ndarray:
+        o = {**DEFAULTS, **(opts or {})}
+        bgr = cv2.imread(src, cv2.IMREAD_COLOR)
+        bg = _bg_mask_by_color_and_border(bgr, o)      # 背景
+        fg = cv2.bitwise_not(bg)                        # 前景
+
+        # 形態學平滑
+        if o["morph_open_close"]:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+            fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, k, 1)
+            fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, k, 1)
+
+        # 只留最大主體（可關）
+        if o["keep_largest"]:
+            n, lab, stats, _ = cv2.connectedComponentsWithStats((fg>0).astype(np.uint8), 8)
+            if n > 1:
+                areas = stats[:, cv2.CC_STAT_AREA]; areas[0] = 0
+                main = int(areas.argmax())
+                fg = ((lab==main).astype(np.uint8))*255
+
+        # 近主體的次塊合併
+        if o["min_keep_area"] > 0 and o["near_radius_ratio"] > 0:
+            h, w = fg.shape[:2]
+            num, labels, stats, cents = cv2.connectedComponentsWithStats((fg>0).astype(np.uint8), connectivity=8)
+            if num > 1:
+                areas = stats[:, cv2.CC_STAT_AREA]; areas[0] = 0
+                main = int(np.argmax(areas))
+                keep = (labels == main).astype(np.uint8) * 255
+                cx, cy = cents[main]
+                R = float(o["near_radius_ratio"]) * max(h, w)
+                for i in range(1, num):
+                    if i == main: continue
+                    if stats[i, cv2.CC_STAT_AREA] < int(o["min_keep_area"]): continue
+                    if np.hypot(cents[i][0]-cx, cents[i][1]-cy) <= R:
+                        keep |= (labels == i).astype(np.uint8) * 255
+                fg = keep
+
+        # 羽化 → alpha
+        if o["feather_px"] and o["feather_px"] > 0:
+            dist = cv2.distanceTransform((fg>0).astype(np.uint8), cv2.DIST_L2, 3)
+            alpha = np.clip(dist / float(o["feather_px"]), 0.0, 1.0)
+            alpha = (alpha * 255).astype(np.uint8)
+        else:
+            alpha = fg
+
+        rgba = np.dstack([bgr[..., ::-1], alpha])       # RGB + A
+        return rgba
+
     # ========== 動圖/影片處理 ==========
     def _remove_anim_or_video(self, src: str, out_dir: str, prefer: str) -> dict:
         if not self._check_ffmpeg():
@@ -514,6 +638,8 @@ class _RmbgWorker(QObject):
                 rgba = self._remove_image_openvino(fpath)
             elif self.engine == "hsv":
                 rgba = self._remove_image_hsv(fpath)
+            elif self.engine == "wand":
+                rgba = self._remove_image_magicwand(fpath)
             else:
                 rgba = self._remove_image_rembg(fpath)
             Image.fromarray(rgba, "RGBA").save(os.path.join(out_frames, fname))
@@ -599,5 +725,130 @@ class _RmbgWorker(QObject):
 #     # 轉存為 gif 動畫，設定 disposal=2
 #     shutil.rmtree(tmp, ignore_errors=True)
 #     output[0].save("oxxostudio.gif", save_all=True, append_images=output[1:], duration=100, loop=0, disposal=2)
-# if __name__ == "__main__":
-#     _test_rm(r'C:\Users\car\Downloads\lixovsk-hoshimi-miyabi.gif')
+if __name__ == "__main__":
+    DEFAULTS = {
+    "contiguous": True,        # 相連(魔術棒)；False=全域 inRange
+    "invert": False,           # 反向選取
+    "connectivity": 4,         # 4 保守 / 8 激進
+    "fixed_range": True,       # floodFill 以 seed 為中心容差
+    "tolH": 8, "tolS": 20, "tolV": 20,  # 容差
+    "use_edge_barrier": True,  # 以邊緣作屏障，保護細節
+    "canny_low": 60, "canny_high": 120,
+    "min_keep_area": 400,      # 只留主體附近的大塊
+    "near_radius_ratio": 0.35, # 主體半徑比例
+    "morph_open_close": True,  # 開/閉運算
+    "feather_px": 2.5          # 邊緣羽化像素
+}
+
+    def _load_bgr(src):
+        if isinstance(src, np.ndarray):
+            a = src
+            if a.ndim == 2:  return cv2.cvtColor(a, cv2.COLOR_GRAY2BGR)
+            if a.ndim == 3 and a.shape[2] == 4: return cv2.cvtColor(a, cv2.COLOR_RGBA2BGR)
+            if a.ndim == 3 and a.shape[2] == 3: return a
+            raise TypeError("ndarray shape 不支援")
+        try:
+            from PIL import Image
+            if isinstance(src, Image.Image):
+                return _load_bgr(np.array(src))
+        except Exception:
+            pass
+        if isinstance(src, (bytes, bytearray)):
+            buf = np.frombuffer(src, np.uint8)
+            img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            if img is None: raise ValueError("imdecode 失敗")
+            return img
+        p = os.fspath(src)
+        if not os.path.exists(p): raise FileNotFoundError(p)
+        img = cv2.imread(p, cv2.IMREAD_COLOR)
+        if img is None:
+            data = np.fromfile(p, np.uint8)
+            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if img is None: raise ValueError(f"imread 失敗: {p}")
+        return img
+
+    def eyedrop_magic_wand(src, seed_xy, opts=None):
+        """
+        seed_xy: (x,y) 取樣座標（基於輸入影像尺寸）
+        回傳: mask(0/255, HxW), preview_bgr(疊色預覽)
+        """
+        o = {**DEFAULTS, **(opts or {})}
+        bgr = _load_bgr(src)
+        h, w = bgr.shape[:2]
+        x, y = map(int, seed_xy)
+        x = np.clip(x, 0, w-1); y = np.clip(y, 0, h-1)
+
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+
+        # --- 生成遮罩 ---
+        if not o["contiguous"]:
+            # 全域 inRange
+            Hs, Ss, Vs = map(int, hsv[y, x])
+            lo = (max(0, Hs-o["tolH"]), max(0, Ss-o["tolS"]), max(0, Vs-o["tolV"]))
+            hi = (min(179, Hs+o["tolH"]), min(255, Ss+o["tolS"]), min(255, Vs+o["tolV"]))
+            mask = cv2.inRange(hsv, lo, hi)  # 255=命中
+        else:
+            # 相連 floodFill
+            ff_mask = np.zeros((h+2, w+2), np.uint8)
+            if o["use_edge_barrier"]:
+                gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+                gray = cv2.GaussianBlur(gray, (5,5), 0)                     # 抑制噪聲後再找邊
+                # 自動門檻：高=1.33*中位數，低=高/3（Canny 建議 2~3:1）
+                med = np.median(gray)
+                high = int(np.clip(1.33*med, 60, 220))
+                low  = max(1, high//3)
+                edges = cv2.Canny(gray, low, high)                          # 只留強邊與連到強邊的弱邊
+                bar = cv2.morphologyEx(edges, cv2.MORPH_CLOSE,              # 補短裂縫
+                                    cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3)), 1)
+                bar = cv2.dilate(bar, np.ones((3,3), np.uint8), 1)          # 輕微加粗
+                ff_mask[1:-1, 1:-1][bar > 0] = 255   
+            flags = cv2.FLOODFILL_MASK_ONLY | (4 if o["connectivity"]==4 else 8)
+            if o["fixed_range"]:
+                flags |= cv2.FLOODFILL_FIXED_RANGE
+            loDiff = (int(o["tolH"]), int(o["tolS"]), int(o["tolV"]))
+            upDiff = (int(o["tolH"]), int(o["tolS"]), int(o["tolV"]))
+            cv2.floodFill(hsv.copy(), ff_mask, (x, y), (0,0,0), loDiff, upDiff, flags)
+            mask = (ff_mask[1:-1, 1:-1] > 0).astype(np.uint8) * 255
+
+        if o["invert"]:
+            mask = 255 - mask
+
+        # --- 連通域過濾：保主體與其附近塊 ---
+        num, labels, stats, cents = cv2.connectedComponentsWithStats((mask>0).astype(np.uint8), connectivity=8)
+        if num > 1:
+            areas = stats[:, cv2.CC_STAT_AREA]; areas[0] = 0
+            main = int(np.argmax(areas))
+            keep = (labels == main).astype(np.uint8) * 255
+            cx, cy = cents[main]
+            R = float(o["near_radius_ratio"]) * max(h, w)
+            for i in range(1, num):
+                if i == main: continue
+                if stats[i, cv2.CC_STAT_AREA] < int(o["min_keep_area"]): continue
+                if np.hypot(cents[i][0]-cx, cents[i][1]-cy) <= R:
+                    keep |= (labels == i).astype(np.uint8) * 255
+            mask = keep
+
+        # --- 形態學與羽化 ---
+        if o["morph_open_close"]:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=1)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=1)
+
+        if o["feather_px"] and o["feather_px"] > 0:
+            dist = cv2.distanceTransform((mask>0).astype(np.uint8)*255, cv2.DIST_L2, 3)
+            alpha = np.clip(dist / float(o["feather_px"]), 0.0, 1.0)
+            mask = (alpha * 255).astype(np.uint8)
+
+        # 預覽疊色
+        overlay = bgr.copy()
+        overlay[mask>0] = (0, 255, 0)
+        preview = cv2.addWeighted(overlay, 0.35, bgr, 0.65, 0)
+
+        return mask, preview
+
+    img_path = r"C:\Users\car\Downloads\ellen-joe-ellen.gif"
+    mask, prev = eyedrop_magic_wand(img_path, seed_xy=(100,120))
+
+    # 顯示或存檔
+    cv2.imwrite("mask.png", mask)
+    cv2.imwrite("preview.png", prev)
