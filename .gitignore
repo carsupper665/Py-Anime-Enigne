@@ -11,6 +11,8 @@ openspec/
 AGENTS.md
 # C extensions
 *.so
+*.sh
+.tools
 
 # Distribution / packaging
 .Python
