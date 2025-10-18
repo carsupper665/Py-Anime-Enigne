@@ -300,7 +300,9 @@ class RmbgThread(QObject):
         self._worker: Optional[_RmbgWorker] = None
 
     def remove_bg(self, src_path: str, out_dir: str = "./animes",
-                  prefer: str = "auto", engine: str = "hsv"): # rembg / openvino / hsv / wand
+                  prefer: str = "auto", engine: str = "hsv",
+                  hsv_cfg: dict | None = None, wand: dict | None = None,
+                  image_format: str | None = None, anim_format: str | None = None): # rembg / openvino / hsv / wand
         # 防止對已刪除的 QThread 呼叫 isRunning()
         if self._thread is not None:
             try:
@@ -311,7 +313,10 @@ class RmbgThread(QObject):
                 self._thread = None
 
         self._thread = QThread()
-        self._worker = _RmbgWorker(src_path, out_dir, prefer, engine, self.logger)
+        self._worker = _RmbgWorker(src_path, out_dir, prefer, engine, self.logger,
+                                   hsv_cfg=hsv_cfg or {}, wand_cfg=wand or {},
+                                   image_format=(image_format or 'webp'),
+                                   anim_format=(anim_format or 'webp'))
         self._worker.moveToThread(self._thread)
 
         # wiring
@@ -337,7 +342,8 @@ class _RmbgWorker(QObject):
     finished = pyqtSignal(dict)
     error = pyqtSignal(object)
 
-    def __init__(self, src_path: str, out_dir: str, prefer: str, engine: str, logger: Logger):
+    def __init__(self, src_path: str, out_dir: str, prefer: str, engine: str, logger: Logger,
+                 hsv_cfg: dict, wand_cfg: dict, image_format: str, anim_format: str):
         super().__init__()
         self.src_path = src_path
         self.out_dir = out_dir
@@ -348,6 +354,26 @@ class _RmbgWorker(QObject):
         self._ov_compiled = None
         # HSV 可調參數（可依需求外部暴露）
         self.hsv_opts = HSVOpts()
+        # 由設定注入
+        try:
+            self.hsv_opts.tol_h = int(hsv_cfg.get("tol_h", self.hsv_opts.tol_h))
+            self.hsv_opts.tol_s = int(hsv_cfg.get("tol_s", self.hsv_opts.tol_s))
+            self.hsv_opts.tol_v = int(hsv_cfg.get("tol_v", self.hsv_opts.tol_v))
+            self.hsv_opts.strength = float(hsv_cfg.get("strength", self.hsv_opts.strength))
+            self.hsv_opts.erode_iter = int(hsv_cfg.get("erode_iter", self.hsv_opts.erode_iter))
+            self.hsv_opts.dilate_iter = int(hsv_cfg.get("dilate_iter", self.hsv_opts.dilate_iter))
+            self.hsv_opts.feather_px = float(hsv_cfg.get("feather_px", self.hsv_opts.feather_px))
+            self.hsv_opts.use_guided = bool(hsv_cfg.get("use_guided", self.hsv_opts.use_guided))
+        except Exception:
+            pass
+        # 魔術棒參數
+        self.wand_opts = wand_cfg or {}
+        self.wand_seed = None
+        if isinstance(self.wand_opts.get("seed", None), (tuple, list)) and len(self.wand_opts["seed"]) == 2:
+            self.wand_seed = (int(self.wand_opts["seed"][0]), int(self.wand_opts["seed"][1]))
+        # 輸出格式
+        self.image_format = (image_format or 'webp').lower()
+        self.anim_format = (anim_format or 'webp').lower()
         self.fps = 0
         # strength=1.5、erode_iter=1、feather_px=2.0
         self.hsv_opts.strength = 1.5
@@ -384,10 +410,11 @@ class _RmbgWorker(QObject):
         except Exception:
             return False
 
-    # OLD
+    # 靜態圖輸出
     def _remove_image(self, src: str, out_dir: str) -> str:
         base = os.path.splitext(os.path.basename(src))[0]
         tmp_png = os.path.join(out_dir, f"{base}_rmbg_tmp.png")
+        out_png = os.path.join(out_dir, f"{base}_rmbg.png")
         out_webp = os.path.join(out_dir, f"{base}_rmbg.webp")
         self.progress.emit({"signalId": "rmbg", "value": 5, "status": f"loading model ({self.engine})"})
 
@@ -396,26 +423,40 @@ class _RmbgWorker(QObject):
         elif self.engine == "hsv":
             rgba = self._remove_image_hsv(src)
         elif self.engine == "wand":
-            rgba = self._remove_image_magicwand(src)
+            if not self.wand_seed:
+                raise RuntimeError("魔術棒需要先在圖片上取樣（點擊）座標。")
+            rgba = self._remove_image_magicwand(src, self.wand_seed, self.wand_opts)
         else:
             rgba = self._remove_image_rembg(src)
 
         Image.fromarray(rgba, "RGBA").save(tmp_png)
 
-        try:
-            subprocess.run([
-                "ffmpeg","-y","-i", tmp_png,
-                "-c:v","libwebp_anim","-lossless","1",
-                "-compression_level","9",
-                "-preset","picture","-exact",  # 無損；改用 -q:v 調體積
-                out_webp
-            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            os.remove(tmp_png)
-            self.progress.emit({"signalId":"rmbg","value":100,"status":"done"})
-            return out_webp
-        except Exception:
-            self.progress.emit({"signalId":"rmbg","value":100,"status":"done(png fallback)"})
-        return tmp_png
+        fmt = (self.image_format or 'webp').lower()
+        if fmt == 'png':
+            # 直接輸出 PNG（無損）
+            try:
+                os.replace(tmp_png, out_png)
+            except Exception:
+                shutil.copyfile(tmp_png, out_png)
+                os.remove(tmp_png)
+            self.progress.emit({"signalId":"rmbg","value":100,"status":"done(png)"})
+            return out_png
+        else:
+            # WEBP（使用 ffmpeg 確保一致性）
+            try:
+                subprocess.run([
+                    "ffmpeg","-y","-i", tmp_png,
+                    "-c:v","libwebp","-lossless","1",
+                    "-compression_level","6",
+                    "-preset","picture",
+                    out_webp
+                ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                os.remove(tmp_png)
+                self.progress.emit({"signalId":"rmbg","value":100,"status":"done(webp)"})
+                return out_webp
+            except Exception:
+                self.progress.emit({"signalId":"rmbg","value":100,"status":"done(png fallback)"})
+                return tmp_png
 
         # Image.fromarray(rgba, mode="RGBA").save(out)
         # self.progress.emit({"signalId": "rmbg", "value": 100, "status": "done"})
@@ -560,52 +601,14 @@ class _RmbgWorker(QObject):
 
 
     # --- 修改: 去背，接受 seed_xy；None 則退回四角 ---
-    def _remove_image_magicwand(self, src: str, opts: Optional[dict] = None) -> np.ndarray:
-        o = {**DEFAULTS, **(opts or {})}
+    def _remove_image_magicwand(self, src: str, seed_xy: tuple[int,int], opts: Optional[dict] = None) -> np.ndarray:
+        from core.wand import compute_mask
         bgr = cv2.imread(src, cv2.IMREAD_COLOR)
-        bg = _bg_mask_by_color_and_border(bgr, o)      # 背景
-        fg = cv2.bitwise_not(bg)                        # 前景
-
-        # 形態學平滑
-        if o["morph_open_close"]:
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
-            fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, k, 1)
-            fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, k, 1)
-
-        # 只留最大主體（可關）
-        if o["keep_largest"]:
-            n, lab, stats, _ = cv2.connectedComponentsWithStats((fg>0).astype(np.uint8), 8)
-            if n > 1:
-                areas = stats[:, cv2.CC_STAT_AREA]; areas[0] = 0
-                main = int(areas.argmax())
-                fg = ((lab==main).astype(np.uint8))*255
-
-        # 近主體的次塊合併
-        if o["min_keep_area"] > 0 and o["near_radius_ratio"] > 0:
-            h, w = fg.shape[:2]
-            num, labels, stats, cents = cv2.connectedComponentsWithStats((fg>0).astype(np.uint8), connectivity=8)
-            if num > 1:
-                areas = stats[:, cv2.CC_STAT_AREA]; areas[0] = 0
-                main = int(np.argmax(areas))
-                keep = (labels == main).astype(np.uint8) * 255
-                cx, cy = cents[main]
-                R = float(o["near_radius_ratio"]) * max(h, w)
-                for i in range(1, num):
-                    if i == main: continue
-                    if stats[i, cv2.CC_STAT_AREA] < int(o["min_keep_area"]): continue
-                    if np.hypot(cents[i][0]-cx, cents[i][1]-cy) <= R:
-                        keep |= (labels == i).astype(np.uint8) * 255
-                fg = keep
-
-        # 羽化 → alpha
-        if o["feather_px"] and o["feather_px"] > 0:
-            dist = cv2.distanceTransform((fg>0).astype(np.uint8), cv2.DIST_L2, 3)
-            alpha = np.clip(dist / float(o["feather_px"]), 0.0, 1.0)
-            alpha = (alpha * 255).astype(np.uint8)
-        else:
-            alpha = fg
-
-        rgba = np.dstack([bgr[..., ::-1], alpha])       # RGB + A
+        if bgr is None:
+            raise RuntimeError("讀圖失敗")
+        mask = compute_mask(bgr, seed_xy, opts or {})
+        rgb = bgr[..., ::-1]
+        rgba = np.dstack([rgb, mask])
         return rgba
 
     # ========== 動圖/影片處理 ==========
@@ -639,7 +642,9 @@ class _RmbgWorker(QObject):
             elif self.engine == "hsv":
                 rgba = self._remove_image_hsv(fpath)
             elif self.engine == "wand":
-                rgba = self._remove_image_magicwand(fpath)
+                if not self.wand_seed:
+                    raise RuntimeError("魔術棒需要先在圖片上取樣（點擊）座標。")
+                rgba = self._remove_image_magicwand(fpath, self.wand_seed, self.wand_opts)
             else:
                 rgba = self._remove_image_rembg(fpath)
             Image.fromarray(rgba, "RGBA").save(os.path.join(out_frames, fname))
@@ -647,7 +652,7 @@ class _RmbgWorker(QObject):
                 pct = 5 + int(80 * i / total)
                 self.progress.emit({"signalId": "rmbg", "value": pct, "status": f"frame {i}/{total}"})
 
-        # 合成：優先 APNG，其次 GIF，再者 WEBM（透明）
+        # 合成輸出：依設定 anim_format 選擇 webp 或 gif
         prefer = (prefer or "auto").lower()
         out_path: Optional[str] = None
 
@@ -670,20 +675,37 @@ class _RmbgWorker(QObject):
 
         self.progress.emit({"signalId": "rmbg", "value": 90, "status": "encode"})
 
-        # "-c:v","libwebp_anim","-lossless","1",
-        #         "-compression_level","9",
-        #         "-preset","picture","-exact",
-
-        out_webp = os.path.join(out_dir, f"{base}_rmbg547.webp")
-        subprocess.run([
-        "ffmpeg","-y","-framerate", str(fps),
-        "-i", os.path.join(out_frames,"f_%06d.png"),
-        "-c:v","libwebp_anim",
-        "-pix_fmt","yuva420p",   # 保透明
-        "-loop","0",            # 無限循環
-        "-q:v","75",             # 或改 -lossless 1
-        out_webp
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        if (self.anim_format or 'webp').lower() == 'gif':
+            out_gif = os.path.join(out_dir, f"{base}_rmbg.gif")
+            # palettegen + paletteuse for better quality
+            palette = os.path.join(tmp, "palette.png")
+            subprocess.run([
+                "ffmpeg","-y","-framerate", str(fps),
+                "-i", os.path.join(out_frames,"f_%06d.png"),
+                "-vf","palettegen=stats_mode=diff",
+                palette
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            subprocess.run([
+                "ffmpeg","-y","-framerate", str(fps),
+                "-i", os.path.join(out_frames,"f_%06d.png"),
+                "-i", palette,
+                "-lavfi","paletteuse=dither=sierra2_4a",
+                "-loop","0",
+                out_gif
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            out_path = out_gif
+        else:
+            out_webp = os.path.join(out_dir, f"{base}_rmbg.webp")
+            subprocess.run([
+                "ffmpeg","-y","-framerate", str(fps),
+                "-i", os.path.join(out_frames,"f_%06d.png"),
+                "-c:v","libwebp_anim",
+                "-pix_fmt","yuva420p",   # 保透明
+                "-loop","0",            # 無限循環
+                "-q:v","75",
+                out_webp
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            out_path = out_webp
 
         # if not out_path:
         #     # 退而求其次：輸出去背後的逐幀資料夾
@@ -694,161 +716,6 @@ class _RmbgWorker(QObject):
 
         # 清理暫存
         shutil.rmtree(tmp, ignore_errors=True)
-        # os.remove(f"./animes/{base}_rmbg_frames",)
         self.progress.emit({"signalId": "rmbg", "value": 100, "status": "done"})
         return {"input": src, "output": out_path, "kind": "anim", "frames": len(files)}
     
-# def _test_rm(path):
-#     n = 0
-#     tmp = tempfile.mkdtemp(prefix="rmbg_")
-#     frames_dir = os.path.join(tmp, "frames")
-#     os.makedirs(frames_dir, exist_ok=True)
-#     print(frames_dir)
-#     extract_args = [
-#             "ffmpeg", "-y", "-i", path,"-vsync","0",
-#             os.path.join(frames_dir, "f_%06d.png")
-#         ]
-#     subprocess.run(extract_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-#     source = sorted([f for f in os.listdir(frames_dir) if f.lower().endswith(".png")])
-#       # source 為要轉存的所有圖片陣列 ( opencv 格式，色彩為 RGBA )
-#     # for i in source:                  # source 為要轉存的所有圖片陣列 ( opencv 格式，色彩為 RGBA )
-#     #     img = Image.open(frames_dir + '\\' +i)      # 轉換成 PIL 格式
-#     #     img.save(f'./gif{n}.gif')  # 儲存為 gif
-#     #     n = n + 1                     # 改變儲存的檔名編號
-
-#     output = []                       # 建立空串列
-#     for i in source:
-#         img = Image.open(frames_dir + '\\' + i)      # 轉換成 PIL 格式
-#         img = img.convert("RGBA")             # 轉換為 RGBA
-#         output.append(img)                    # 記錄每張圖片內容
-
-#     # 轉存為 gif 動畫，設定 disposal=2
-#     shutil.rmtree(tmp, ignore_errors=True)
-#     output[0].save("oxxostudio.gif", save_all=True, append_images=output[1:], duration=100, loop=0, disposal=2)
-if __name__ == "__main__":
-    DEFAULTS = {
-    "contiguous": True,        # 相連(魔術棒)；False=全域 inRange
-    "invert": False,           # 反向選取
-    "connectivity": 4,         # 4 保守 / 8 激進
-    "fixed_range": True,       # floodFill 以 seed 為中心容差
-    "tolH": 8, "tolS": 20, "tolV": 20,  # 容差
-    "use_edge_barrier": True,  # 以邊緣作屏障，保護細節
-    "canny_low": 60, "canny_high": 120,
-    "min_keep_area": 400,      # 只留主體附近的大塊
-    "near_radius_ratio": 0.35, # 主體半徑比例
-    "morph_open_close": True,  # 開/閉運算
-    "feather_px": 2.5          # 邊緣羽化像素
-}
-
-    def _load_bgr(src):
-        if isinstance(src, np.ndarray):
-            a = src
-            if a.ndim == 2:  return cv2.cvtColor(a, cv2.COLOR_GRAY2BGR)
-            if a.ndim == 3 and a.shape[2] == 4: return cv2.cvtColor(a, cv2.COLOR_RGBA2BGR)
-            if a.ndim == 3 and a.shape[2] == 3: return a
-            raise TypeError("ndarray shape 不支援")
-        try:
-            from PIL import Image
-            if isinstance(src, Image.Image):
-                return _load_bgr(np.array(src))
-        except Exception:
-            pass
-        if isinstance(src, (bytes, bytearray)):
-            buf = np.frombuffer(src, np.uint8)
-            img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-            if img is None: raise ValueError("imdecode 失敗")
-            return img
-        p = os.fspath(src)
-        if not os.path.exists(p): raise FileNotFoundError(p)
-        img = cv2.imread(p, cv2.IMREAD_COLOR)
-        if img is None:
-            data = np.fromfile(p, np.uint8)
-            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
-        if img is None: raise ValueError(f"imread 失敗: {p}")
-        return img
-
-    def eyedrop_magic_wand(src, seed_xy, opts=None):
-        """
-        seed_xy: (x,y) 取樣座標（基於輸入影像尺寸）
-        回傳: mask(0/255, HxW), preview_bgr(疊色預覽)
-        """
-        o = {**DEFAULTS, **(opts or {})}
-        bgr = _load_bgr(src)
-        h, w = bgr.shape[:2]
-        x, y = map(int, seed_xy)
-        x = np.clip(x, 0, w-1); y = np.clip(y, 0, h-1)
-
-        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-
-        # --- 生成遮罩 ---
-        if not o["contiguous"]:
-            # 全域 inRange
-            Hs, Ss, Vs = map(int, hsv[y, x])
-            lo = (max(0, Hs-o["tolH"]), max(0, Ss-o["tolS"]), max(0, Vs-o["tolV"]))
-            hi = (min(179, Hs+o["tolH"]), min(255, Ss+o["tolS"]), min(255, Vs+o["tolV"]))
-            mask = cv2.inRange(hsv, lo, hi)  # 255=命中
-        else:
-            # 相連 floodFill
-            ff_mask = np.zeros((h+2, w+2), np.uint8)
-            if o["use_edge_barrier"]:
-                gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-                gray = cv2.GaussianBlur(gray, (5,5), 0)                     # 抑制噪聲後再找邊
-                # 自動門檻：高=1.33*中位數，低=高/3（Canny 建議 2~3:1）
-                med = np.median(gray)
-                high = int(np.clip(1.33*med, 60, 220))
-                low  = max(1, high//3)
-                edges = cv2.Canny(gray, low, high)                          # 只留強邊與連到強邊的弱邊
-                bar = cv2.morphologyEx(edges, cv2.MORPH_CLOSE,              # 補短裂縫
-                                    cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3)), 1)
-                bar = cv2.dilate(bar, np.ones((3,3), np.uint8), 1)          # 輕微加粗
-                ff_mask[1:-1, 1:-1][bar > 0] = 255   
-            flags = cv2.FLOODFILL_MASK_ONLY | (4 if o["connectivity"]==4 else 8)
-            if o["fixed_range"]:
-                flags |= cv2.FLOODFILL_FIXED_RANGE
-            loDiff = (int(o["tolH"]), int(o["tolS"]), int(o["tolV"]))
-            upDiff = (int(o["tolH"]), int(o["tolS"]), int(o["tolV"]))
-            cv2.floodFill(hsv.copy(), ff_mask, (x, y), (0,0,0), loDiff, upDiff, flags)
-            mask = (ff_mask[1:-1, 1:-1] > 0).astype(np.uint8) * 255
-
-        if o["invert"]:
-            mask = 255 - mask
-
-        # --- 連通域過濾：保主體與其附近塊 ---
-        num, labels, stats, cents = cv2.connectedComponentsWithStats((mask>0).astype(np.uint8), connectivity=8)
-        if num > 1:
-            areas = stats[:, cv2.CC_STAT_AREA]; areas[0] = 0
-            main = int(np.argmax(areas))
-            keep = (labels == main).astype(np.uint8) * 255
-            cx, cy = cents[main]
-            R = float(o["near_radius_ratio"]) * max(h, w)
-            for i in range(1, num):
-                if i == main: continue
-                if stats[i, cv2.CC_STAT_AREA] < int(o["min_keep_area"]): continue
-                if np.hypot(cents[i][0]-cx, cents[i][1]-cy) <= R:
-                    keep |= (labels == i).astype(np.uint8) * 255
-            mask = keep
-
-        # --- 形態學與羽化 ---
-        if o["morph_open_close"]:
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=1)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=1)
-
-        if o["feather_px"] and o["feather_px"] > 0:
-            dist = cv2.distanceTransform((mask>0).astype(np.uint8)*255, cv2.DIST_L2, 3)
-            alpha = np.clip(dist / float(o["feather_px"]), 0.0, 1.0)
-            mask = (alpha * 255).astype(np.uint8)
-
-        # 預覽疊色
-        overlay = bgr.copy()
-        overlay[mask>0] = (0, 255, 0)
-        preview = cv2.addWeighted(overlay, 0.35, bgr, 0.65, 0)
-
-        return mask, preview
-
-    img_path = r"C:\Users\car\Downloads\ellen-joe-ellen.gif"
-    mask, prev = eyedrop_magic_wand(img_path, seed_xy=(100,120))
-
-    # 顯示或存檔
-    cv2.imwrite("mask.png", mask)
-    cv2.imwrite("preview.png", prev)

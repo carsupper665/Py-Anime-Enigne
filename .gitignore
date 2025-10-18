@@ -13,6 +13,7 @@ AGENTS.md
 *.so
 *.sh
 .tools
+_tmp_hsv_test/
 
 # Distribution / packaging
 .Python

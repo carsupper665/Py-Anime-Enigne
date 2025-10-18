@@ -51,6 +51,15 @@ class NavBar(QWidget):
         self.set_gif = self._make_button("", icon_path=r"./src/images/view_btn.png", page_index=2, tooltip="Add gif to desktop")
         layout.addWidget(self.set_gif)
 
+        # 設定頁
+        try:
+            self.settings_btn = self._make_button("", icon_path=r"./src/images/settings_btn.png", page_index=3, tooltip="設定")
+            layout.addWidget(self.settings_btn)
+        except Exception:
+            # 圖示缺失時也允許建立按鈕
+            self.settings_btn = self._make_button("設定", icon_path=None, page_index=3, tooltip="設定")
+            layout.addWidget(self.settings_btn)
+
         layout.addItem(QSpacerItem(20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
         # layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 

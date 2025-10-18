@@ -7,6 +7,8 @@ from PyQt6.QtGui import (QFont,)
 from PyQt6.QtCore import (Qt, pyqtSlot, QThread,)
 import sys
 from ui import *
+from core.config import load_config
+import os
 
 import sys
 
@@ -22,6 +24,8 @@ class Main(QMainWindow):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
         self.anime_data = None
+        # 讀取設定
+        self.config = load_config()
 
         self.toast = Toast(self)
         self.toast_loading = LoadingToast(self)
@@ -66,13 +70,36 @@ class Main(QMainWindow):
         self.rmbg_thread.error.connect(self._on_exception)
         self.rmbg_thread.finished.connect(self._rmbg_finished)
 
-    @pyqtSlot(str, str) # (src_path: str, prefer: str = "auto"):
-    def _on_rmbg(self, src: str, prefer: str):
+    @pyqtSlot(str, str, dict) # (src_path: str, prefer: str = "auto", opts: dict):
+    def _on_rmbg(self, src: str, prefer: str, opts: dict):
         self.toast_loading.show_loading(title="Removeing BG")
         self.logger.debug("Removeing BG")
         if prefer == "":
             prefer = "auto"
-        self.rmbg_thread.remove_bg(src_path=src, prefer=prefer)
+        # 套用設定：引擎與輸出目錄
+        out_dir = self.config.get("output", {}).get("dir", "./animes")
+        engine = (prefer or self.config.get("engine", "hsv")).lower()
+        # OpenVINO 模型（若有）
+        ov_model = self.config.get("openvino", {}).get("model_path", "").strip()
+        if ov_model:
+            os.environ["RMBG_MODEL_PATH"] = ov_model
+        # 設定覆寫邏輯：HomePage 可傳入臨時 HSV 配置；wand 直接傳 seed 與參數
+        hsv_cfg = self.config.get("hsv", {})
+        if engine == "hsv" and isinstance(opts, dict) and "hsv" in opts:
+            hsv_cfg = opts.get("hsv", {})
+        wand_cfg = opts if engine == "wand" else None
+        img_fmt = self.config.get("output", {}).get("image", "webp").lower()
+        anim_fmt = self.config.get("output", {}).get("anim", "webp").lower()
+        self.rmbg_thread.remove_bg(
+            src_path=src,
+            out_dir=out_dir,
+            prefer=prefer,
+            engine=engine,
+            hsv_cfg=hsv_cfg,
+            wand=wand_cfg,
+            image_format=img_fmt,
+            anim_format=anim_fmt,
+        )
 
     @pyqtSlot(dict) # {input, output, kind, frames?, manifest?}
     def _rmbg_finished(self, payload: dict):
@@ -94,10 +121,13 @@ class Main(QMainWindow):
         self.home_page = HomePage(self)
         self.add_page = AddPage(self, self.logger)
         self.edit_page = EditPage(self, self.logger)
+        self.settings_page = SettingsPage(self)
+        # 設定儲存後更新主設定
+        self.settings_page.configSaved.connect(self._reload_config)
         self.add_page.on_activated.connect(self.edit_page._update_list)
         self.add_page.gif_closed.connect(self.edit_page._delete_gif)
         self.edit_page.sync_gifs.connect(self.add_page.on_sync)
-        pages = [self.home_page, self.add_page, self.edit_page,self.loading_page]
+        pages = [self.home_page, self.add_page, self.edit_page, self.settings_page, self.loading_page]
 
         for page in pages:
             self.content_widget.addWidget(page)
@@ -115,6 +145,10 @@ class Main(QMainWindow):
         self.load.progress.connect(self.loading_page.update_progress)
         self.load.finished.connect(self._init_finished)
         self.loading_thread.start()
+
+    def _reload_config(self, cfg: dict):
+        self.logger.info("設定已更新，重新載入設定…")
+        self.config = cfg
 
 
     @pyqtSlot(dict)
@@ -176,4 +210,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

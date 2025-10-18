@@ -8,6 +8,7 @@ from .ui_error import UnexpectedError, connect_crash_dialog, MainApp, install_gl
 from .threads import *
 from .add_page import AddPage
 from .edit_page import EditPage
+from .settings_page import SettingsPage
 
 INFO = "info"
 WARN = "warn"
@@ -22,6 +23,5 @@ __all__ = ["NavBar", "LoadingPage", "HomePage", "Toast",
            "AddPage", "COLOR", "GifLoader", "MediaInfo", 
            "EditPage", "connect_crash_dialog", "MainApp",
             "install_global_handlers", "RmbgThread",
-            "LoadingToast", "FFmpegNotFoundError"
+            "LoadingToast", "FFmpegNotFoundError", "SettingsPage"
            ]
-
