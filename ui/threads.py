@@ -302,7 +302,8 @@ class RmbgThread(QObject):
     def remove_bg(self, src_path: str, out_dir: str = "./animes",
                   prefer: str = "auto", engine: str = "hsv",
                   hsv_cfg: dict | None = None, wand: dict | None = None,
-                  image_format: str | None = None, anim_format: str | None = None): # rembg / openvino / hsv / wand
+                  image_format: str | None = None, anim_format: str | None = None,
+                  range_ms: tuple[int | None, int | None] | None = None): # rembg / openvino / hsv / wand
         # 防止對已刪除的 QThread 呼叫 isRunning()
         if self._thread is not None:
             try:
@@ -316,7 +317,8 @@ class RmbgThread(QObject):
         self._worker = _RmbgWorker(src_path, out_dir, prefer, engine, self.logger,
                                    hsv_cfg=hsv_cfg or {}, wand_cfg=wand or {},
                                    image_format=(image_format or 'webp'),
-                                   anim_format=(anim_format or 'webp'))
+                                   anim_format=(anim_format or 'webp'),
+                                   range_ms=range_ms)
         self._worker.moveToThread(self._thread)
 
         # wiring
@@ -337,13 +339,21 @@ class RmbgThread(QObject):
         self._thread.quit()
         # self._thread = None
 
+    def cancel_current(self):
+        try:
+            if self._worker is not None:
+                self._worker.request_cancel()
+        except Exception:
+            pass
+
 class _RmbgWorker(QObject):
     progress = pyqtSignal(dict)
     finished = pyqtSignal(dict)
     error = pyqtSignal(object)
 
     def __init__(self, src_path: str, out_dir: str, prefer: str, engine: str, logger: Logger,
-                 hsv_cfg: dict, wand_cfg: dict, image_format: str, anim_format: str):
+                 hsv_cfg: dict, wand_cfg: dict, image_format: str, anim_format: str,
+                 range_ms: tuple[int | None, int | None] | None = None):
         super().__init__()
         self.src_path = src_path
         self.out_dir = out_dir
@@ -373,14 +383,26 @@ class _RmbgWorker(QObject):
             self.wand_seed = (int(self.wand_opts["seed"][0]), int(self.wand_opts["seed"][1]))
         # 輸出格式
         self.image_format = (image_format or 'webp').lower()
-        self.anim_format = (anim_format or 'webp').lower()
+        # 規格：影片/動圖輸出強制 animated-webp
+        self.anim_format = 'webp'
         self.fps = 0
+        self.range_ms = range_ms or (None, None)
         # strength=1.5、erode_iter=1、feather_px=2.0
         self.hsv_opts.strength = 1.5
+        self._cancel_requested = False  # OpenSpec: add-processing-queue — cancel current job
+        # spec: openspec/changes/add-processing-queue/tasks.md:1
+
+    def request_cancel(self):
+        self._cancel_requested = True
+
+    def _is_canceled(self) -> bool:
+        return bool(self._cancel_requested)
 
     @pyqtSlot()
     def do_remove(self):
         try:
+            if self._is_canceled():
+                raise RuntimeError("canceled")
             if not os.path.isfile(self.src_path):
                 raise FileNotFoundError(self.src_path)
             os.makedirs(self.out_dir, exist_ok=True)
@@ -412,12 +434,16 @@ class _RmbgWorker(QObject):
 
     # 靜態圖輸出
     def _remove_image(self, src: str, out_dir: str) -> str:
+        if self._is_canceled():
+            raise RuntimeError("canceled")
         base = os.path.splitext(os.path.basename(src))[0]
         tmp_png = os.path.join(out_dir, f"{base}_rmbg_tmp.png")
         out_png = os.path.join(out_dir, f"{base}_rmbg.png")
         out_webp = os.path.join(out_dir, f"{base}_rmbg.webp")
         self.progress.emit({"signalId": "rmbg", "value": 5, "status": f"loading model ({self.engine})"})
 
+        if self._is_canceled():
+            raise RuntimeError("canceled")
         if self.engine == "openvino":
             rgba = self._remove_image_openvino(src)
         elif self.engine == "hsv":
@@ -623,11 +649,21 @@ class _RmbgWorker(QObject):
 
         # 抽幀
         self.progress.emit({"signalId": "rmbg", "value": 5, "status": "extract frames"})
-        extract_args = [
-            "ffmpeg", "-y", "-i", src,"-vsync","0",
-            os.path.join(frames_dir, "f_%06d.png")
-        ]
-        subprocess.run(extract_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        # in/out（毫秒）
+        t_in, t_out = self.range_ms
+        extract_args = ["ffmpeg", "-y"]
+        if isinstance(t_in, int) and t_in > 0:
+            extract_args += ["-ss", f"{t_in/1000:.3f}"]
+        extract_args += ["-i", src, "-vsync", "0"]
+        if isinstance(t_out, int) and t_out > 0:
+            # 使用 -to 終點時間（以輸入時間軸為準）
+            extract_args += ["-to", f"{t_out/1000:.3f}"]
+        extract_args += [os.path.join(frames_dir, "f_%06d.png")]
+        try:
+            subprocess.run(extract_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        except Exception:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
 
         files = sorted([f for f in os.listdir(frames_dir) if f.lower().endswith(".png")])
         total = max(1, len(files))
@@ -635,22 +671,28 @@ class _RmbgWorker(QObject):
         # 逐幀去背
         out_frames = os.path.join(tmp, "out")
         os.makedirs(out_frames, exist_ok=True)
-        for i, fname in enumerate(files, 1):
-            fpath = os.path.join(frames_dir, fname)
-            if self.engine == "openvino":
-                rgba = self._remove_image_openvino(fpath)
-            elif self.engine == "hsv":
-                rgba = self._remove_image_hsv(fpath)
-            elif self.engine == "wand":
-                if not self.wand_seed:
-                    raise RuntimeError("魔術棒需要先在圖片上取樣（點擊）座標。")
-                rgba = self._remove_image_magicwand(fpath, self.wand_seed, self.wand_opts)
-            else:
-                rgba = self._remove_image_rembg(fpath)
-            Image.fromarray(rgba, "RGBA").save(os.path.join(out_frames, fname))
-            if i % 3 == 0 or i == total:
-                pct = 5 + int(80 * i / total)
-                self.progress.emit({"signalId": "rmbg", "value": pct, "status": f"frame {i}/{total}"})
+        try:
+            for i, fname in enumerate(files, 1):
+                if self._is_canceled():
+                    raise RuntimeError("canceled")
+                fpath = os.path.join(frames_dir, fname)
+                if self.engine == "openvino":
+                    rgba = self._remove_image_openvino(fpath)
+                elif self.engine == "hsv":
+                    rgba = self._remove_image_hsv(fpath)
+                elif self.engine == "wand":
+                    if not self.wand_seed:
+                        raise RuntimeError("魔術棒需要先在圖片上取樣（點擊）座標。")
+                    rgba = self._remove_image_magicwand(fpath, self.wand_seed, self.wand_opts)
+                else:
+                    rgba = self._remove_image_rembg(fpath)
+                Image.fromarray(rgba, "RGBA").save(os.path.join(out_frames, fname))
+                if i % 3 == 0 or i == total:
+                    pct = 5 + int(80 * i / total)
+                    self.progress.emit({"signalId": "rmbg", "value": pct, "status": f"frame {i}/{total}"})
+        except Exception:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
 
         # 合成輸出：依設定 anim_format 選擇 webp 或 gif
         prefer = (prefer or "auto").lower()
@@ -674,38 +716,22 @@ class _RmbgWorker(QObject):
         self.fps = fps
 
         self.progress.emit({"signalId": "rmbg", "value": 90, "status": "encode"})
-
-        if (self.anim_format or 'webp').lower() == 'gif':
-            out_gif = os.path.join(out_dir, f"{base}_rmbg.gif")
-            # palettegen + paletteuse for better quality
-            palette = os.path.join(tmp, "palette.png")
+        # 規格：固定輸出 animated-webp
+        out_webp = os.path.join(out_dir, f"{base}_rmbg.webp")
+        try:
             subprocess.run([
-                "ffmpeg","-y","-framerate", str(fps),
-                "-i", os.path.join(out_frames,"f_%06d.png"),
-                "-vf","palettegen=stats_mode=diff",
-                palette
-            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            subprocess.run([
-                "ffmpeg","-y","-framerate", str(fps),
-                "-i", os.path.join(out_frames,"f_%06d.png"),
-                "-i", palette,
-                "-lavfi","paletteuse=dither=sierra2_4a",
-                "-loop","0",
-                out_gif
-            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            out_path = out_gif
-        else:
-            out_webp = os.path.join(out_dir, f"{base}_rmbg.webp")
-            subprocess.run([
-                "ffmpeg","-y","-framerate", str(fps),
-                "-i", os.path.join(out_frames,"f_%06d.png"),
-                "-c:v","libwebp_anim",
-                "-pix_fmt","yuva420p",   # 保透明
-                "-loop","0",            # 無限循環
-                "-q:v","75",
-                out_webp
+            "ffmpeg","-y","-framerate", str(fps),
+            "-i", os.path.join(out_frames,"f_%06d.png"),
+            "-c:v","libwebp_anim",
+            "-pix_fmt","yuva420p",   # 保透明
+            "-loop","0",            # 無限循環
+            "-q:v","75",
+            out_webp
             ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
             out_path = out_webp
+        except Exception:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
 
         # if not out_path:
         #     # 退而求其次：輸出去背後的逐幀資料夾

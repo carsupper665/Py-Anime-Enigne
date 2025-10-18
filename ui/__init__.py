@@ -6,9 +6,11 @@ from .home_page import HomePage
 from .logger import loggerFactory, C
 from .ui_error import UnexpectedError, connect_crash_dialog, MainApp, install_global_handlers
 from .threads import *
+from .queue import ProcessingQueue, QueueJob
 from .add_page import AddPage
 from .edit_page import EditPage
 from .settings_page import SettingsPage
+from .preview_dialog import PreviewImageDialog
 
 INFO = "info"
 WARN = "warn"
@@ -23,5 +25,5 @@ __all__ = ["NavBar", "LoadingPage", "HomePage", "Toast",
            "AddPage", "COLOR", "GifLoader", "MediaInfo", 
            "EditPage", "connect_crash_dialog", "MainApp",
             "install_global_handlers", "RmbgThread",
-            "LoadingToast", "FFmpegNotFoundError", "SettingsPage"
+            "LoadingToast", "FFmpegNotFoundError", "SettingsPage", "ProcessingQueue", "QueueJob", "PreviewImageDialog"
            ]

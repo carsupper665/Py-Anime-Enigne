@@ -51,6 +51,8 @@ class HomePage(QWidget):
     toast = pyqtSignal(dict)  # {level,title,message,duration}
     # src_path, prefer, options
     removeBg = pyqtSignal(str, str, dict)
+    # 佇列：加入任務
+    enqueueJob = pyqtSignal(str, str, dict)
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -111,6 +113,7 @@ class HomePage(QWidget):
         self.btn_set_in = QPushButton("設為入點", self.ctrl_bar)
         self.btn_set_out = QPushButton("設為出點", self.ctrl_bar)
         self.btn_trim = QPushButton("剪出新檔", self.ctrl_bar)
+        self.btn_preview_frame = QPushButton("預覽影格", self.ctrl_bar)
         self.btn_mute = QPushButton("去音另存", self.ctrl_bar)
         for b in (self.btn_set_in, self.btn_set_out, self.btn_trim, self.btn_mute, self.btn_play):
             b.setStyleSheet(_BTN_STYLE)
@@ -119,10 +122,13 @@ class HomePage(QWidget):
             self.btn_set_out.clicked.connect(self._mark_out)
             self.btn_trim.clicked.connect(self._ffmpeg_trim)
             self.btn_mute.clicked.connect(self._ffmpeg_mute)
+        # 預覽影格不依賴多媒體模組，皆可使用（以 ffmpeg 擷取影格）
+        self.btn_preview_frame.clicked.connect(self._open_video_preview)
         ctrl_row.addWidget(self.btn_play)
         ctrl_row.addWidget(self.btn_set_in)
         ctrl_row.addWidget(self.btn_set_out)
         ctrl_row.addWidget(self.btn_trim)
+        ctrl_row.addWidget(self.btn_preview_frame)
         ctrl_row.addWidget(self.btn_mute)
 
         # 左側容器
@@ -150,8 +156,13 @@ class HomePage(QWidget):
         clear.clicked.connect(self.clear_preview)
         self.save = QPushButton("儲存", self)
         self.save.clicked.connect(self._save_with_prompt)
+        self.enqueue_btn = QPushButton("加入佇列", self)
+        # OpenSpec: add-processing-queue — enqueue UI
+        # spec: openspec/changes/add-processing-queue/specs/processing-queue/spec.md:7
+        self.enqueue_btn.clicked.connect(self._enqueue_current)
         btns.addStretch(); btns.addWidget(pick); btns.addWidget(clear)
-        pick.setStyleSheet(_BTN_STYLE); clear.setStyleSheet(_BTN_STYLE); self.save.setStyleSheet(_SAVE_STYLE)
+        btns.addWidget(self.enqueue_btn)
+        pick.setStyleSheet(_BTN_STYLE); clear.setStyleSheet(_BTN_STYLE); self.save.setStyleSheet(_SAVE_STYLE); self.enqueue_btn.setStyleSheet(_BTN_STYLE)
         self.save.setDisabled(True)
 
         right_panel = QW(self)
@@ -225,6 +236,23 @@ class HomePage(QWidget):
         self.btn_wand.clicked.connect(self._open_wand_dialog)
         wand_row.addWidget(self.btn_wand)
         rv.addLayout(wand_row)
+        # 簡易佇列狀態列
+        qrow = QHBoxLayout()
+        self.queue_label = QLabel("Queue: 0 pending", self)
+        self.q_pause = QPushButton("暫停")
+        self.q_resume = QPushButton("繼續")
+        self.q_cancel = QPushButton("取消當前")
+        for b in (self.q_pause, self.q_resume, self.q_cancel):
+            b.setStyleSheet(_BTN_STYLE)
+        self.q_pause.clicked.connect(lambda: self._queue_cmd('pause'))
+        self.q_resume.clicked.connect(lambda: self._queue_cmd('resume'))
+        self.q_cancel.clicked.connect(lambda: self._queue_cmd('cancel'))
+        qrow.addWidget(self.queue_label)
+        qrow.addStretch(1)
+        qrow.addWidget(self.q_pause)
+        qrow.addWidget(self.q_resume)
+        qrow.addWidget(self.q_cancel)
+        rv.addLayout(qrow)
         rv.addStretch(1)
         rv.addWidget(self.save)
 
@@ -268,12 +296,14 @@ class HomePage(QWidget):
             s.valueChanged.connect(self._update_preview_if_live)
         if hasattr(self, 'cb_guided'):
             self.cb_guided.toggled.connect(self._update_preview_if_live)
+        # 佇列統計（由 Main 綁定更新）
+        self._queue_pending = 0
 
     # ---------- 顯示/隱藏影片控制 ----------
     def _set_controls_visible(self, visible: bool):
         self.seek.setVisible(visible and _MULTIMEDIA_AVAILABLE)
         self.ctrl_bar.setVisible(visible and _MULTIMEDIA_AVAILABLE)
-        self.rem_bg.setVisible(not visible)
+        # self.rem_bg.setVisible(not visible)
 
     # ---------- file picking ----------
     def pick_file(self):
@@ -457,31 +487,81 @@ class HomePage(QWidget):
                 opts = {}
                 if prefer == "wand":
                     seed = getattr(self, "_wand_seed", None)
+                    opts = {"seed": seed, "tolH": int(self.wand_tol.value()), "tolS": 60, "tolV": 60, "contiguous": True}
                     if seed is None:
                         self.toast.emit({"level":"warn","title":"魔術棒","message":"請先選取區域","duration":3000})
                         return
-                    opts = {"seed": seed, "tolH": int(self.wand_tol.value()), "tolS": 60, "tolV": 60, "contiguous": True}
                 elif prefer == "hsv":
                     opts = {"hsv": {"tol_h": int(self.s_h.value()), "tol_s": int(self.s_s.value()), "tol_v": int(self.s_v.value())}}
-                self.removeBg.emit(temp_path, prefer, opts)
+                # OpenSpec: update-queue-nonblocking-integration — 一律透過佇列
+
+                # 傳遞影片 in/out（毫秒）
+                if self._in_ms is not None or self._out_ms is not None:
+                    try:
+                        opts.setdefault('range', {})
+                        if self._in_ms is not None:
+                            opts['range']['in_ms'] = int(self._in_ms)
+                        if self._out_ms is not None:
+                            opts['range']['out_ms'] = int(self._out_ms)
+                    except Exception:
+                        pass
+
+                self.enqueueJob.emit(temp_path, prefer, opts)
                 self.toast.emit({
                     "level": "info",
-                    "title": "remove backgrund...",
-                    "message": f"Wait...",
-                    "duration": 5000,
+                    "title": "已加入佇列",
+                    "message": f"等待處理…",
+                    "duration": 3000,
                 })
                 return
+            
+            
             if p in _EXTS:
                 shutil.copyfile(self._current_path, save_path)
             else:
-                #TODO convert to webp
-                self.toast.emit({
-                    "level": "warning",
-                    "title": "不支援的格式",
-                    "message": f"目前僅支援儲存為 GIF/WEBP。",
-                    "duration": 5000,
-                })
-                pass
+                # 非支援的直拷格式：嘗試轉成 WEBP（靜態或動態）
+                try:
+                    out_webp = os.path.splitext(save_path)[0] + ".webp"
+                    src_ext = os.path.splitext(self._current_path)[1].lower()
+                    is_video_or_anim = (src_ext in VIDEO_EXTS) or (src_ext in {".apng"})
+                    # 若有入點/出點，帶入 ffmpeg 參數
+                    t_in = None if self._in_ms is None else max(0, int(self._in_ms))
+                    t_out = None if self._out_ms is None else max(0, int(self._out_ms))
+                    ok = False
+                    if is_video_or_anim:
+                        # 動態：轉成 animated webp（與規格一致）
+                        args = ["ffmpeg", "-y"]
+                        if t_in is not None:
+                            args += ["-ss", f"{t_in/1000:.3f}"]
+                        args += ["-i", self._current_path]
+                        if t_out is not None and t_out > (t_in or 0):
+                            args += ["-to", f"{t_out/1000:.3f}"]
+                        args += [
+                            "-c:v","libwebp_anim","-pix_fmt","yuva420p",
+                            "-loop","0","-q:v","75", out_webp
+                        ]
+                        ok, _ = self._ffmpeg(args)
+                    else:
+                        # 靜態：轉成 webp（無損）
+                        args = [
+                            "ffmpeg","-y","-i", self._current_path,
+                            "-c:v","libwebp","-lossless","1",
+                            "-compression_level","6","-preset","picture",
+                            out_webp
+                        ]
+                        ok, _ = self._ffmpeg(args)
+                    if not ok:
+                        self.toast.emit({
+                            "level": "error",
+                            "title": "轉檔失敗",
+                            "message": "請確認已安裝 ffmpeg 並重試。",
+                            "duration": 6000,
+                        })
+                        return
+                    save_path = out_webp
+                except Exception as _e:
+                    self.on_exception.emit(_e)
+                    return
             if self._movie:
                 self._movie.start()
             self.update_data.emit()
@@ -496,6 +576,8 @@ class HomePage(QWidget):
 
     def _remove_bg(self):
         pass
+
+    # ========== 影片工具 ==========
 
     def eventFilter(self, obj, ev):
         # 魔術棒：在圖片模式、engine=wand 下，記錄點擊座標
@@ -532,11 +614,16 @@ class HomePage(QWidget):
         return (src_x, src_y)
 
     def _open_wand_dialog(self):
-        # 僅在圖片模式可用
+        # 圖片模式：直接用當前路徑；影片模式：擷取當前影格
         if not self._current_path:
             return
+        path = self._current_path
+        if _MULTIMEDIA_AVAILABLE and self.left_stack.currentIndex() == 1:
+            tmp = self._extract_current_frame()
+            if tmp:
+                path = tmp
         from ui.wand_dialog import WandDialog
-        dlg = WandDialog(self._current_path, tol_h=self.wand_tol.value(), parent=self)
+        dlg = WandDialog(path, tol_h=self.wand_tol.value(), parent=self)
         res = dlg.exec()
         out = dlg.get_result()
         if res and out:
@@ -545,6 +632,119 @@ class HomePage(QWidget):
             self.wand_tol.setValue(int(tol_h))
             # 預覽
             self._update_preview()
+
+    def _extract_current_frame(self) -> str | None:
+        try:
+            if not self._current_path:
+                return None
+            os.makedirs('./temp', exist_ok=True)
+            out = os.path.join('./temp', 'preview_frame.png')
+            t_ms = 0
+            if _MULTIMEDIA_AVAILABLE and hasattr(self, 'player'):
+                t_ms = int(self.player.position())
+            args = [
+                "ffmpeg", "-y",
+                "-ss", f"{t_ms/1000:.3f}",
+                "-i", self._current_path,
+                "-frames:v", "1",
+                out
+            ]
+            ok, _ = self._ffmpeg(args)
+            return out if ok else None
+        except Exception:
+            return None
+
+    def _open_video_preview(self):
+        try:
+            path = self._extract_current_frame()
+            if not path:
+                self.toast.emit({"level":"error","title":"預覽失敗","message":"擷取影格失敗","duration":3000})
+                return
+            from ui.preview_dialog import PreviewImageDialog
+            init_hsv = {
+                "tol_h": int(self.s_h.value()),
+                "tol_s": int(self.s_s.value()),
+                "tol_v": int(self.s_v.value()),
+                "strength": float(self.s_strength.value())/100.0,
+            }
+            dlg = PreviewImageDialog(path, refresh_fn=self._extract_current_frame, init_hsv=init_hsv, parent=self)
+            # 接收預覽對話框回傳，套用到本頁控制
+            dlg.hsvChanged.connect(self._apply_hsv_from_preview)
+            dlg.seedSelected.connect(self._apply_seed_from_preview)
+            dlg.exec()
+        except Exception as e:
+            self.on_exception.emit(e)
+
+    def _apply_hsv_from_preview(self, payload: dict):
+        try:
+            if 'tol_h' in payload: self.s_h.setValue(int(payload['tol_h']))
+            if 'tol_s' in payload: self.s_s.setValue(int(payload['tol_s']))
+            if 'tol_v' in payload: self.s_v.setValue(int(payload['tol_v']))
+            if 'strength' in payload: self.s_strength.setValue(int(float(payload['strength'])*100))
+            self._update_preview_if_live()
+        except Exception:
+            pass
+
+    def _apply_seed_from_preview(self, seed):
+        try:
+            if isinstance(seed, (tuple, list)) and len(seed) == 2:
+                self._wand_seed = (int(seed[0]), int(seed[1]))
+                self.toast.emit({"level":"info","title":"魔術棒","message":f"取樣座標：{self._wand_seed}","duration":1500})
+        except Exception:
+            pass
+
+    # ---------- Queue helpers ----------
+    def _enqueue_current(self):
+        try:
+            if not self._current_path:
+                self.toast.emit({"level":"warn","title":"加入佇列","message":"請先選擇檔案","duration":2000}); return
+            prefer = getattr(self, "engine_box", None).currentText() if hasattr(self, "engine_box") else "hsv"
+            opts: dict = {}
+            # 也在「加入佇列」按鈕加入 in/out
+            if self._in_ms is not None or self._out_ms is not None:
+                try:
+                    opts.setdefault('range', {})
+                    if self._in_ms is not None:
+                        opts['range']['in_ms'] = int(self._in_ms)
+                    if self._out_ms is not None:
+                        opts['range']['out_ms'] = int(self._out_ms)
+                except Exception:
+                    pass
+            if prefer == "wand":
+                seed = getattr(self, "_wand_seed", None)
+                if seed is None:
+                    self.toast.emit({"level":"warn","title":"魔術棒","message":"請先選取區域","duration":2000}); return
+                opts = {"seed": seed, "tolH": int(self.wand_tol.value()), "tolS": 60, "tolV": 60, "contiguous": True}
+            elif prefer == "hsv":
+                opts = {"hsv": {"tol_h": int(self.s_h.value()), "tol_s": int(self.s_s.value()), "tol_v": int(self.s_v.value())}}
+            # 將臨時檔交由主程式產生後執行（沿用 _save_with_prompt 的邏輯）
+            # 這裡直接用來源檔路徑，Main 會在實際執行時處理 temp 與輸出
+            self.enqueueJob.emit(self._current_path, prefer, opts)
+            self._queue_pending += 1
+            self.queue_label.setText(f"Queue: {self._queue_pending} pending")
+        except Exception as e:
+            self.on_exception.emit(e)
+
+    def _queue_cmd(self, cmd: str):
+        # 交由 Main 透過 ProcessingQueue 實作；這裡只傳遞 toast 提示
+        try:
+            p = self.parent()
+            if not p or not hasattr(p, 'queue'):
+                return
+            q = getattr(p, 'queue')
+            if cmd == 'pause':
+                q.pause()
+                self.toast.emit({"level":"info","title":"佇列","message":"已暫停","duration":1500})
+            elif cmd == 'resume':
+                q.resume()
+                self.toast.emit({"level":"info","title":"佇列","message":"繼續","duration":1500})
+            elif cmd == 'cancel':
+                q.cancel_current()
+                if hasattr(p, 'rmbg_thread'):
+                    p.rmbg_thread.cancel_current()
+                self.toast.emit({"level":"warn","title":"佇列","message":"已取消當前（若可）","duration":1500})
+        except Exception as e:
+            self.on_exception.emit(e)
 
     def _on_engine_changed(self, eng: str):
         is_hsv = (eng == "hsv")
