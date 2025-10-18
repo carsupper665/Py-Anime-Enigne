@@ -39,19 +39,6 @@ class MainApp(QApplication):
         self.error_bus = ErrorBus()
         self._guard = False  # 防止重入
 
-    # def notify(self, receiver, event):
-    #     try:
-    #         return super().notify(receiver, event)
-    #     except RuntimeError as e:
-    #         print(f"Qt event error, receiver:{receiver}, event:{event}")
-    #         if "wrapped C/C++ object" in str(e):
-    #             return False
-    #         self._emit("Qt event error", e)
-    #         return False
-    #     except BaseException as e:
-    #         self._emit("Qt event error", e)
-    #         return False
-
     def _emit(self, title: str, e: BaseException):
         if self._guard:
             return

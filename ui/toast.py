@@ -344,6 +344,22 @@ class LoadingToast(QDialog):
         if px is not None and py is not None and self.parent():
             self.move(px + 20, py + (self.parent().height() - self.height() - 20))
         self.open(); self.raise_()
+    
+        # 可拖曳移動
+    def mousePressEvent(self, e: QMouseEvent):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_active = True
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self._drag_offset = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, e: QMouseEvent):
+        if getattr(self, "_drag_active", False) and (e.buttons() & Qt.MouseButton.LeftButton):
+            self.move(e.globalPosition().toPoint() - self._drag_offset)
+
+    def mouseReleaseEvent(self, e: QMouseEvent):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_active = False
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
 
     @pyqtSlot()
     def on_exception_cancel(self):
