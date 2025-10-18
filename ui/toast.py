@@ -49,7 +49,6 @@ class _DetailDialog(QDialog):
 
 class Toast(QDialog):
     """單一組件同時支援：
-    - Loading 模式：ApplicationModal，鎖全域互動；可按 Cancel；可程式進度 set_progress。
     - Notice 模式：非模態倒數，顯示在最前。
     """
 
@@ -136,35 +135,6 @@ class Toast(QDialog):
         loop.exec()
         return
 
-    # def show_loading(self, title: str = "Loading...", message: str = "Please wait...", px: int | None = None, py: int | None = None):
-    #     # 直接使用 QDialog 的 ApplicationModal，避免額外遮罩層攔截事件
-    #     # self._recover = self.windowModality()
-    #     self.loading_mode = True
-    #     self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
-    #     self.setWindowModality(Qt.WindowModality.ApplicationModal)
-    #     self.setModal(True)
-    #     self._is_fatal = False
-    #     self._accent = "#11a4f3"; self._apply_style()
-    #     self.lt.setText(title); self.msg.setText(message)
-    #     self.details_btn.setVisible(False)
-    #     self.ok.setText("Cancel")
-    #     self.bar.setRange(0, 100); self.bar.setValue(0)
-    #     self.adjustSize()
-    #     if px is not None and py is not None and self.parent():
-    #         self.move(px + 20, py + (self.parent().height() - self.height() - 20))
-    #     self.open(); self.raise_()
-
-    # def set_progress(self, value: int, text: str | None = None):
-    #     if not self.loading_mode:
-    #         return
-    #     v = max(0, min(100, int(value)))
-    #     self.bar.setValue(v)
-    #     if text is not None:
-    #         self.msg.setText(text)
-    #     if v >= 100:
-    #         self._window_recover()
-    #         self.finished.emit()
-
     def show_notice(
         self,
         level: str,
@@ -184,11 +154,6 @@ class Toast(QDialog):
             twin.fatalTriggered.connect(self.fatalTriggered)
             twin.show_notice(level, title, message, ms, px, py, traceback, allow_multiple=False)
             return  # loading 狀態不接受 notice
-        # # 確保非模態
-        # self.setModal(False)
-        # self.setWindowModality(Qt.WindowModality.NonModal)
-
-        # print(self._is_fatal)
 
         if allow_multiple and self.isVisible():
             twin = Toast(self.parent())
@@ -251,48 +216,12 @@ class Toast(QDialog):
             else:
                 self.hide()
 
-    # def _window_recover(self):
-    #     self.hide()
-    #     self.setModal(False)
-    #     self.setWindowModality(Qt.WindowModality.NonModal)
-    #     self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.ToolTip)
-    #     self.loading_mode = False
-
     def _confirm(self):
         # loading=取消；notice=立即關閉
         self._tick.stop(); self._hide_timer.stop()
         self.hide()
         if self._is_fatal:
             self._do_fatal()
-
-    # @pyqtSlot(dict)
-    # def update_progress(self, data: dict):
-    #     if not self.loading_mode:
-    #         print(f"Cant update progress in notice mode, ID:{data.get('signalId', None)}")
-    #         return
-        
-    #     id = data.get("signalId")
-    #     value = data.get("value")
-    #     status_text = data.get("status")
-
-    #     if (value is None) and (status_text is None) or (id is None):
-    #         if id is None:
-    #         #    self.logger.warning("No signalId in progress data")
-    #             print("No signalId in progress data")
-    #         return
-    #     try:
-    #         if value is not None and type(value) == int:
-    #             self.bar.setValue(value)
-    #             if value >= 100:
-    #                 self._window_recover()
-    #                 self.finished.emit()
-    #         if status_text is not None:
-    #             self.msg.setText(status_text)
-            
-    #         # self.logger.debug(f"progress: {id}, status: {status_text}, value: {value} ")
-    #     except Exception as e:
-    #         # self.logger.error(f"UI update progress error: \n {e.with_traceback()}")
-    #         raise e
 
     # 可拖曳移動
     def mousePressEvent(self, e: QMouseEvent):

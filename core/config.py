@@ -38,6 +38,10 @@ def get_default_config() -> Dict[str, Any]:
             "anim": "webp",    # webp | gif
             "dir": "./animes",
         },
+        # 規格：影片輸出固定為 animated-webp（不含音訊/背景合成選項）
+        "video": {
+            "format": "animated-webp"
+        },
     }
 
 
@@ -57,6 +61,14 @@ def load_config() -> Dict[str, Any]:
                 elif isinstance(v, dict) and isinstance(d.get(k), dict):
                     _merge(d[k], v)
         _merge(data, default)
+        # 規格相容性處理：強制影片輸出格式為 animated-webp；忽略舊版可能殘留的可變設定
+        try:
+            if isinstance(data.get("video"), dict):
+                data["video"]["format"] = "animated-webp"
+            else:
+                data["video"] = {"format": "animated-webp"}
+        except Exception:
+            data["video"] = {"format": "animated-webp"}
         return data
     except Exception:
         # 壞掉時回退預設
@@ -69,4 +81,3 @@ def save_config(cfg: Dict[str, Any]) -> Path:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
     return path
-

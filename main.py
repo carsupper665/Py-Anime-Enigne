@@ -157,7 +157,7 @@ class Main(QMainWindow):
             msg = os.path.basename(getattr(job, 'src', ''))
             # 抑制 _on_rmbg 再次顯示 loading
             self._suppress_rmbg_loading = True
-            self.toast_loading.show_loading(title=title, message=msg, px=self._get_x(), py=self._get_y())
+            self.toast_loading.show_loading(title=title, message=msg)
             # 開始執行
             self._on_rmbg(job.src, job.prefer, job.opts)
         except Exception as e:
@@ -177,8 +177,8 @@ class Main(QMainWindow):
         _input = payload.get("input"); _output = payload.get("output"); _kind = payload.get("kind"); _frames = payload.get("frames", None); _manifest = payload.get("manifest", None)
         self.logger.debug(f"input: {_input}\noutput:{_output}\nkind{_kind}")
         self.logger.debug(f"frames: {_frames}, manifest{_manifest}")
-        self.toast.show_notice(INFO, title="File Saved", message=f"input: {_input}\noutput:{_output}\nkind{_kind}", px=self._get_x(), py=self._get_y())
         self.gif_loader.reload()
+        self.toast.show_notice(INFO, title="File Saved", message=f"input: {_input}\noutput:{_output}\nkind{_kind}", px=self._get_x(), py=self._get_y())
 
     @pyqtSlot(dict)
     def reload_anime_data(self, data):
