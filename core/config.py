@@ -42,6 +42,9 @@ def get_default_config() -> Dict[str, Any]:
         "video": {
             "format": "animated-webp"
         },
+        # OSD 版面（關閉時保存、下次載入時還原）
+        # 每筆：{name, path, x, y, w, h, visible}
+        "osd": [],
     }
 
 
