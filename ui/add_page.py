@@ -95,7 +95,7 @@ class AddPage(QWidget):
         payload: {"dir": str, "items": [{"path": str, "width": int, "height": int, "is_anim": bool, "bytes": int}, ...]}
         mode: "replace" | "merge"
         """
-        self.logger.debug(f"AddPage.update_data() called with mode={mode}, payload={payload}")
+        self.logger.debug(f"AddPage.update_data() called with mode={mode}, payload={payload if len(payload.get('items', []))<5 else '...'}")
         try:
             if not isinstance(payload, dict) or "items" not in payload:
                 return

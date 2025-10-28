@@ -9,6 +9,7 @@ temp/
 *.onnx
 openspec/
 AGENTS.md
+.github/
 # C extensions
 *.so
 *.sh

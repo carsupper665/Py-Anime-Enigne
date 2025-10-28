@@ -1,4 +1,4 @@
-#main.py
+﻿#main.py
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, 
     QStackedWidget, QApplication, QLabel
@@ -134,6 +134,19 @@ class Main(QMainWindow):
                     rng = (rin, rout)
         except Exception:
             rng = None
+        # 匯出參數優先由 HomePage 傳入（opts.export），否則回退 config 通用設定
+        export_opts = opts.get('export') if isinstance(opts, dict) else None
+        if not isinstance(export_opts, dict):
+            try:
+                out_cfg = self.config.get("output", {}) if isinstance(self.config, dict) else {}
+                export_opts = {
+                    "quality": int(out_cfg.get("quality", 75)),
+                    # max_fps = 0 代表自動（不約束），>0 則限縮
+                    "max_fps": int(out_cfg.get("max_fps", 15)),
+                    "loop": bool(out_cfg.get("loop", True)),
+                }
+            except Exception:
+                export_opts = {"quality": 75, "max_fps": 15, "loop": True}
         self.rmbg_thread.remove_bg(
             src_path=src,
             out_dir=out_dir,
@@ -144,6 +157,7 @@ class Main(QMainWindow):
             image_format=img_fmt,
             anim_format=anim_fmt,
             range_ms=rng,
+            export_opts=export_opts,
         )
 
     # ----- Queue + LoadingToast integration -----
@@ -184,7 +198,7 @@ class Main(QMainWindow):
     def reload_anime_data(self, data):
         self.anime_data = data
         self.logger.debug(f"Anime data reloaded")
-        self.logger.debug(f"Data: {self.anime_data}")
+        self.logger.debug(f"Data: {self.anime_data if len(self.anime_data.get('items', []))<5 else '...'}")
         self.add_page.update_data(data, mode="replace")
 
     def load_pages(self):
@@ -239,8 +253,98 @@ class Main(QMainWindow):
     
     def _get_y(self):
         return self.pos().y()
-    
+
+    # ---- OSD layout persistence ----
+    def _save_osd_layout(self):
+        try:
+            osd_list = []
+            # Collect from EditPage's activated_gifs
+            if hasattr(self, 'edit_page') and hasattr(self.edit_page, 'activated_gifs'):
+                for name, osd in getattr(self.edit_page, 'activated_gifs', {}).items():
+                    try:
+                        if osd is None:
+                            continue
+                        g = osd.geometry()
+                        path = osd.get_path() if hasattr(osd, 'get_path') else None
+                        if not path:
+                            continue
+                        osd_list.append({
+                            'name': name,
+                            'path': path,
+                            'x': int(g.x()), 'y': int(g.y()),
+                            'w': int(g.width()), 'h': int(g.height()),
+                            'visible': bool(osd.isVisible()),
+                        })
+                    except Exception:
+                        continue
+            self.config['osd'] = osd_list
+            save_config(self.config)
+        except Exception as e:
+            self.logger.error(f"save osd layout failed: {e}")
+
+    def _restore_osd_layout(self):
+        try:
+            items = self.config.get('osd', []) if isinstance(self.config, dict) else []
+            if not items:
+                return
+            for it in items:
+                try:
+                    name = it.get('name') or ''
+                    path = it.get('path') or ''
+                    if not path:
+                        continue
+                    osd = OSD(name=name)
+                    # Wire events to existing pages
+                    if hasattr(self.add_page, 'gif_closed'):
+                        osd.on_closed.connect(self.add_page.gif_closed)
+                    if hasattr(self.add_page, 'on_exception'):
+                        osd.on_exception.connect(self.add_page.on_exception)
+                    osd.set_media(path)
+                    # Geometry
+                    x = int(it.get('x', 100)); y = int(it.get('y', 100))
+                    w = int(it.get('w', 320)); h = int(it.get('h', 240))
+                    osd.resize(max(200, w), max(200, h))
+                    osd.move(max(0, x), max(0, y))
+                    if it.get('visible', True):
+                        osd.show()
+                        osd.activateWindow()
+                    # Sync into lists via AddPage
+                    if hasattr(self.add_page, 'set_activated_gifs'):
+                        self.add_page.set_activated_gifs(osd)
+                except Exception as ie:
+                    self.logger.error(f"restore osd failed: {ie}")
+        except Exception as e:
+            self.logger.error(f"restore osd layout failed: {e}")
+           
+
     @pyqtSlot(dict)
+    def _close_all_osd(self):
+        try:
+            if hasattr(self, 'edit_page') and hasattr(self.edit_page, 'activated_gifs'):
+                try:
+                    items = list(self.edit_page.activated_gifs.items())
+                except Exception:
+                    items = []
+                for name, osd in items:
+                    try:
+                        if osd is None:
+                            continue
+                        osd.close()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def closeEvent(self, ev):
+        try:
+            self._save_osd_layout()
+        except Exception:
+            pass
+        try:
+            self._close_all_osd()
+        except Exception:
+            pass
+        super().closeEvent(ev)
     def _init_finished(self, payload: dict):
         self.loading_thread.quit()
         self.loading_thread.wait()
@@ -253,6 +357,10 @@ class Main(QMainWindow):
         self.add_page.update_data(payload, mode="replace")
         self.logger.debug(f"Initial data loaded: {self.anime_data}")
         # self.toast.show_loading("Initializing...")
+        try:
+            self._restore_osd_layout()
+        except Exception:
+            pass
 
     # ----- ProcessingQueue integration -----
     @pyqtSlot(str, str, dict)
@@ -271,7 +379,7 @@ class Main(QMainWindow):
                     pass
             # 入列
             self.queue.enqueue(QueueJob(src=src, prefer=prefer or 'auto', opts=opts or {}))
-            self.toast.show_notice(INFO, "已加入佇列", f"{os.path.basename(src)}")
+            self.toast.show_notice(INFO, "已加入佇列", f"{os.path.basename(src)}", px=self._get_x(), py=self._get_y())
         except Exception as e:
             self._on_exception(e)
 

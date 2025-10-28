@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 ui/threads.py — 背景移除整合版
 
@@ -303,22 +303,31 @@ class RmbgThread(QObject):
                   prefer: str = "auto", engine: str = "hsv",
                   hsv_cfg: dict | None = None, wand: dict | None = None,
                   image_format: str | None = None, anim_format: str | None = None,
-                  range_ms: tuple[int | None, int | None] | None = None): # rembg / openvino / hsv / wand
+                  range_ms: tuple[int | None, int | None] | None = None,
+                  export_opts: dict | None = None): # rembg / openvino / hsv / wand
         # 防止對已刪除的 QThread 呼叫 isRunning()
         if self._thread is not None:
             try:
                 if self._thread.isRunning():
-                    self.progress.emit({"signalId": "rmbg", "value": 100, "status": "loading model"})
-                    return
+                    if hasattr(self._worker, 'rembg_is_finished'):
+                        if self._worker.rembg_is_finished():
+                            print("Previous rembg job already finished, starting new one...")
+                            self._thread.quit()
+                            self._thread.wait(100)
+                            self._thread = None
+                    else:
+                        self.progress.emit({"signalId": "rmbg", "value": 100, "status": "deduplicated"})
+                        return
             except RuntimeError:
                 self._thread = None
-
+        self._worker = None
         self._thread = QThread()
         self._worker = _RmbgWorker(src_path, out_dir, prefer, engine, self.logger,
                                    hsv_cfg=hsv_cfg or {}, wand_cfg=wand or {},
                                    image_format=(image_format or 'webp'),
                                    anim_format=(anim_format or 'webp'),
-                                   range_ms=range_ms)
+                                   range_ms=range_ms,
+                                   export_opts=(export_opts or {}))
         self._worker.moveToThread(self._thread)
 
         # wiring
@@ -328,11 +337,11 @@ class RmbgThread(QObject):
         self._worker.error.connect(self.error)
         self._worker.error.connect(self.error_clear)
         self._worker.finished.connect(self._thread.quit)
+        self._worker.finished.connect(self.finished)
 
         self._thread.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._thread.deleteLater)
         self._thread.start()
-
     
     @pyqtSlot(object)
     def error_clear(self, e):
@@ -353,7 +362,8 @@ class _RmbgWorker(QObject):
 
     def __init__(self, src_path: str, out_dir: str, prefer: str, engine: str, logger: Logger,
                  hsv_cfg: dict, wand_cfg: dict, image_format: str, anim_format: str,
-                 range_ms: tuple[int | None, int | None] | None = None):
+                 range_ms: tuple[int | None, int | None] | None = None,
+                 export_opts: dict | None = None):
         super().__init__()
         self.src_path = src_path
         self.out_dir = out_dir
@@ -364,6 +374,7 @@ class _RmbgWorker(QObject):
         self._ov_compiled = None
         # HSV 可調參數（可依需求外部暴露）
         self.hsv_opts = HSVOpts()
+        self._rembg_finished = False
         # 由設定注入
         try:
             self.hsv_opts.tol_h = int(hsv_cfg.get("tol_h", self.hsv_opts.tol_h))
@@ -387,6 +398,14 @@ class _RmbgWorker(QObject):
         self.anim_format = 'webp'
         self.fps = 0
         self.range_ms = range_ms or (None, None)
+        # 匯出參數（當次優先）
+        try:
+            eo = export_opts or {}
+            self.export_quality = int(eo.get("quality", 75))
+            self.export_max_fps = int(eo.get("max_fps", 0))
+            self.export_loop = bool(eo.get("loop", True))
+        except Exception:
+            self.export_quality, self.export_max_fps, self.export_loop = 75, 0, True
         # strength=1.5、erode_iter=1、feather_px=2.0
         self.hsv_opts.strength = 1.5
         self._cancel_requested = False  # OpenSpec: add-processing-queue — cancel current job
@@ -399,6 +418,7 @@ class _RmbgWorker(QObject):
         return bool(self._cancel_requested)
 
     @pyqtSlot()
+    # main logic
     def do_remove(self):
         try:
             if self._is_canceled():
@@ -423,6 +443,11 @@ class _RmbgWorker(QObject):
             self.finished.emit({"input": self.src_path, "output": out, "kind": "image"})
         except Exception as e:
             self.error.emit(e)
+        finally:
+            self._rembg_finished = True
+
+    def rembg_is_finished(self) -> bool:
+        return self._rembg_finished
 
     # ---- helpers ----
     def _check_ffmpeg(self) -> bool:
@@ -713,21 +738,41 @@ class _RmbgWorker(QObject):
                 return 15
             
         fps = _probe_fps(src)
+        try:
+            if hasattr(self, 'export_max_fps'):
+                if self.export_max_fps is not None and int(self.export_max_fps) > 0:
+                    fps = [int(self.export_max_fps), int(fps)][1] if int(fps) < int(self.export_max_fps) else int(self.export_max_fps)
+                    fps = max(1, fps)
+                    print(f"限制輸出 fps={fps}")
+        except Exception:
+            pass
         self.fps = fps
-
         self.progress.emit({"signalId": "rmbg", "value": 90, "status": "encode"})
         # 規格：固定輸出 animated-webp
         out_webp = os.path.join(out_dir, f"{base}_rmbg.webp")
         try:
-            subprocess.run([
-            "ffmpeg","-y","-framerate", str(fps),
+            loop_flag = "0"
+            try:
+                if hasattr(self, 'export_loop') and not bool(self.export_loop):
+                    loop_flag = "1"
+            except Exception:
+                loop_flag = "0"
+            qv = "75"
+            try:
+                if hasattr(self, 'export_quality'):
+                    qv = str(int(self.export_quality))
+            except Exception:
+                qv = "75"
+            args = [
+            "ffmpeg","-y","-framerate", str(self.fps),
             "-i", os.path.join(out_frames,"f_%06d.png"),
             "-c:v","libwebp_anim",
-            "-pix_fmt","yuva420p",   # 保透明
-            "-loop","0",            # 無限循環
-            "-q:v","75",
+            "-pix_fmt","yuva420p",
+            "-loop", loop_flag,
+            "-q:v", qv,
             out_webp
-            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            ]
+            subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
             out_path = out_webp
         except Exception:
             shutil.rmtree(tmp, ignore_errors=True)

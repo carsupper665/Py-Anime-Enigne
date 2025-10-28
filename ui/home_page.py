@@ -1,4 +1,4 @@
-# ui/home_page.py
+﻿# ui/home_page.py
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QFileDialog, QSplitter,
     QInputDialog, QMessageBox, QSlider, QStackedLayout, QWidget as QW, QCheckBox,
@@ -56,6 +56,7 @@ class HomePage(QWidget):
 
     def __init__(self, parent):
         super().__init__(parent)
+        self.p = parent
         self.setObjectName("HomePage")
         self._movie: QMovie | None = None
         self._current_path: str | None = None
@@ -113,7 +114,7 @@ class HomePage(QWidget):
         self.btn_set_in = QPushButton("設為入點", self.ctrl_bar)
         self.btn_set_out = QPushButton("設為出點", self.ctrl_bar)
         self.btn_trim = QPushButton("剪出新檔", self.ctrl_bar)
-        self.btn_preview_frame = QPushButton("預覽影格", self.ctrl_bar)
+
         self.btn_mute = QPushButton("去音另存", self.ctrl_bar)
         for b in (self.btn_set_in, self.btn_set_out, self.btn_trim, self.btn_mute, self.btn_play):
             b.setStyleSheet(_BTN_STYLE)
@@ -123,12 +124,12 @@ class HomePage(QWidget):
             self.btn_trim.clicked.connect(self._ffmpeg_trim)
             self.btn_mute.clicked.connect(self._ffmpeg_mute)
         # 預覽影格不依賴多媒體模組，皆可使用（以 ffmpeg 擷取影格）
-        self.btn_preview_frame.clicked.connect(self._open_video_preview)
+
         ctrl_row.addWidget(self.btn_play)
         ctrl_row.addWidget(self.btn_set_in)
         ctrl_row.addWidget(self.btn_set_out)
         ctrl_row.addWidget(self.btn_trim)
-        ctrl_row.addWidget(self.btn_preview_frame)
+
         ctrl_row.addWidget(self.btn_mute)
 
         # 左側容器
@@ -219,10 +220,10 @@ class HomePage(QWidget):
         rv.addLayout(hsv_row3)
 
         prev_row = QHBoxLayout()
-        self.cb_live = QCheckBox("即時預覽"); self.cb_live.setStyleSheet("color:#FFFFFF")
+
         self.btn_preview = QPushButton("預覽"); self.btn_preview.setStyleSheet(_BTN_STYLE)
-        self.btn_preview.clicked.connect(self._update_preview)
-        prev_row.addWidget(self.cb_live)
+        self.btn_preview.clicked.connect(self._on_preview_clicked)
+
         prev_row.addStretch(1)
         prev_row.addWidget(self.btn_preview)
         rv.addLayout(prev_row)
@@ -428,14 +429,36 @@ class HomePage(QWidget):
                 return
             orig_name = os.path.basename(self._current_path)
             base, ext = os.path.splitext(orig_name)
-            text, ok = QInputDialog.getText(self, "儲存檔名", "輸入檔名（可不含副檔名）:", text=base)
-            if not ok:
+            from ui.save_dialog import SaveDialog
+            cfg = getattr(self.p, "config", {})
+            out_cfg = (cfg.get("output", {}) if isinstance(cfg, dict) else {})
+            default_q = int(out_cfg.get("quality", 75)); default_fps = int(out_cfg.get("max_fps", 15)); default_loop = bool(out_cfg.get("loop", True))
+            default_name = base + ext
+            sd = SaveDialog(self, default_name=default_name, quality=default_q, max_fps=(default_fps if default_fps>0 else 15), auto_fps=(default_fps<=0), loop=default_loop, enable_size=False)
+            if sd.exec() != 1:
                 return
-            name = text.strip()
+            result = sd.result_payload()
+            name = (result.get("name") or "").strip()
             if not name:
                 return
             if os.path.splitext(name)[1] == "":
                 name += ext
+            # update config with common options
+            parent = self.p
+            if parent and hasattr(parent, "config"):
+                parent.config.setdefault("output", {})
+                parent.config["output"]["quality"] = int(result.get("quality", default_q))
+                parent.config["output"]["max_fps"] = (0 if bool(result.get("max_fps_auto", False)) else int(result.get("max_fps", (default_fps if default_fps>0 else 15))))
+                parent.config["output"]["loop"] = bool(result.get("loop", default_loop))
+                from core.config import save_config
+                save_config(parent.config)
+            # store per-run options for current save flow
+            _save_opts = {
+                "quality": int(result.get("quality", default_q)),
+                "max_fps": (0 if bool(result.get("max_fps_auto", False)) else int(result.get("max_fps", (default_fps if default_fps>0 else 15)))),
+                "loop": bool(result.get("loop", default_loop))
+            }
+            self._last_save_opts = dict(_save_opts)
             out_dir = self._get_out_dir()
             os.makedirs(out_dir, exist_ok=True)
             save_path = os.path.join(out_dir, name)
@@ -506,6 +529,7 @@ class HomePage(QWidget):
                     except Exception:
                         pass
 
+                opts.setdefault('export', dict(self._last_save_opts))
                 self.enqueueJob.emit(temp_path, prefer, opts)
                 self.toast.emit({
                     "level": "info",
@@ -540,7 +564,7 @@ class HomePage(QWidget):
                             "-c:v","libwebp_anim","-pix_fmt","yuva420p",
                             "-loop","0","-q:v","75", out_webp
                         ]
-                        ok, _ = self._ffmpeg(args)
+                        ok, _ = self._ffmpeg(self._apply_export_opts(args, getattr(self, "_last_save_opts", {})))
                     else:
                         # 靜態：轉成 webp（無損）
                         args = [
@@ -549,7 +573,7 @@ class HomePage(QWidget):
                             "-compression_level","6","-preset","picture",
                             out_webp
                         ]
-                        ok, _ = self._ffmpeg(args)
+                        ok, _ = self._ffmpeg(self._apply_export_opts(args, getattr(self, "_last_save_opts", {})))
                     if not ok:
                         self.toast.emit({
                             "level": "error",
@@ -649,26 +673,51 @@ class HomePage(QWidget):
                 "-frames:v", "1",
                 out
             ]
-            ok, _ = self._ffmpeg(args)
+            ok, _ = self._ffmpeg(self._apply_export_opts(args, getattr(self, "_last_save_opts", {})))
             return out if ok else None
         except Exception:
             return None
 
+    # def _open_video_preview(self):
+    #     try:
+    #         path = self._extract_current_frame()
+    #         if not path:
+    #             self.toast.emit({"level":"error","title":"預覽失敗","message":"擷取影格失敗","duration":3000})
+    #             return
+    #         from ui.preview_dialog import PreviewImageDialog
+    #         init_hsv = {
+    #             "tol_h": int(self.s_h.value()),
+    #             "tol_s": int(self.s_s.value()),
+    #             "tol_v": int(self.s_v.value()),
+    #             "strength": float(self.s_strength.value())/100.0,
+    #         }
+    #         dlg = PreviewImageDialog(path, refresh_fn=self._extract_current_frame, init_hsv=init_hsv, parent=self)
+    #         # 接收預覽對話框回傳，套用到本頁控制
+    #         dlg.hsvChanged.connect(self._apply_hsv_from_preview)
+    #         dlg.seedSelected.connect(self._apply_seed_from_preview)
+    #         dlg.exec()
+    #     except Exception as e:
+    #         self.on_exception.emit(e)
+
     def _open_video_preview(self):
         try:
-            path = self._extract_current_frame()
-            if not path:
-                self.toast.emit({"level":"error","title":"預覽失敗","message":"擷取影格失敗","duration":3000})
-                return
+            self.toast.emit({"level":"info","title":"預覽","message":"正在開啟預覽視窗…","duration":1500})
             from ui.preview_dialog import PreviewImageDialog
+            if not getattr(self, '_current_path', None):
+                self.toast.emit({"level":"error","title":"錯誤","message":"請先載入影片","duration":3000}); return
             init_hsv = {
                 "tol_h": int(self.s_h.value()),
                 "tol_s": int(self.s_s.value()),
                 "tol_v": int(self.s_v.value()),
                 "strength": float(self.s_strength.value())/100.0,
             }
-            dlg = PreviewImageDialog(path, refresh_fn=self._extract_current_frame, init_hsv=init_hsv, parent=self)
-            # 接收預覽對話框回傳，套用到本頁控制
+            init_ms = None
+            try:
+                if globals().get('_MULTIMEDIA_AVAILABLE') and hasattr(self, 'player'):
+                    init_ms = int(self.player.position())
+            except Exception:
+                init_ms = None
+            dlg = PreviewImageDialog(self._current_path, refresh_fn=None, init_hsv=init_hsv, init_ms=init_ms, parent=self)
             dlg.hsvChanged.connect(self._apply_hsv_from_preview)
             dlg.seedSelected.connect(self._apply_seed_from_preview)
             dlg.exec()
@@ -719,6 +768,8 @@ class HomePage(QWidget):
                 opts = {"hsv": {"tol_h": int(self.s_h.value()), "tol_s": int(self.s_s.value()), "tol_v": int(self.s_v.value())}}
             # 將臨時檔交由主程式產生後執行（沿用 _save_with_prompt 的邏輯）
             # 這裡直接用來源檔路徑，Main 會在實際執行時處理 temp 與輸出
+            if isinstance(opts, dict) and hasattr(self, "_last_save_opts"):
+                opts.setdefault('export', dict(getattr(self, '_last_save_opts', {})))
             self.enqueueJob.emit(self._current_path, prefer, opts)
             self._queue_pending += 1
             self.queue_label.setText(f"Queue: {self._queue_pending} pending")
@@ -728,8 +779,9 @@ class HomePage(QWidget):
     def _queue_cmd(self, cmd: str):
         # 交由 Main 透過 ProcessingQueue 實作；這裡只傳遞 toast 提示
         try:
-            p = self.parent()
+            p = self.p
             if not p or not hasattr(p, 'queue'):
+                p.logger.error("無法存取處理佇列")
                 return
             q = getattr(p, 'queue')
             if cmd == 'pause':
@@ -881,7 +933,7 @@ class HomePage(QWidget):
             "ffmpeg", "-y", "-ss", f"{self._in_ms/1000:.3f}", "-to", f"{self._out_ms/1000:.3f}",
             "-i", self._current_path, "-c", "copy", out,
         ]
-        ok, _ = self._ffmpeg(args)
+        ok, _ = self._ffmpeg(self._apply_export_opts(args, getattr(self, "_last_save_opts", {})))
         if ok:
             self.toast.emit({"level": "info", "title": "完成", "message": f"已輸出 {os.path.basename(out)}", "duration": 4000})
             self.update_data.emit()
@@ -893,7 +945,67 @@ class HomePage(QWidget):
         if not out:
             return
         args = ["ffmpeg", "-y", "-i", self._current_path, "-c", "copy", "-an", out]
-        ok, _ = self._ffmpeg(args)
+        ok, _ = self._ffmpeg(self._apply_export_opts(args, getattr(self, "_last_save_opts", {})))
         if ok:
             self.toast.emit({"level": "info", "title": "完成", "message": f"已輸出 {os.path.basename(out)}", "duration": 4000})
             self.update_data.emit()
+
+    def _on_preview_clicked(self):
+        try:
+            if not getattr(self, '_current_path', None):
+                self.toast.emit({"level":"error","title":"預覽失敗","message":"沒有可預覽的來源","duration":3000}); return
+            ext = os.path.splitext(self._current_path)[1].lower()
+            is_video = ext in VIDEO_EXTS
+            is_anim = False
+            try:
+                r = QImageReader(self._current_path)
+                r.setDecideFormatFromContent(True)
+                is_anim = r.supportsAnimation()
+            except Exception:
+                is_anim = False
+            if is_video or is_anim:
+                self._open_video_preview()
+            else:
+                self._update_preview()
+        except Exception as e:
+            self.on_exception.emit(e)
+
+    def _apply_export_opts(self, args: list[str], opts: dict) -> list[str]:
+        try:
+            # 僅處理 animated webp 編碼參數
+            if "libwebp_anim" not in args:
+                return args
+            new = list(args)
+            # loop
+            try:
+                loop_flag = "0" if bool(opts.get('loop', True)) else "1"
+                if "-loop" in new:
+                    i = new.index("-loop")
+                    if i+1 < len(new):
+                        new[i+1] = loop_flag
+                else:
+                    new.extend(["-loop", loop_flag])
+            except Exception:
+                pass
+            # quality
+            try:
+                qv = str(int(opts.get('quality', 75)))
+                if "-q:v" in new:
+                    i = new.index("-q:v")
+                    if i+1 < len(new):
+                        new[i+1] = qv
+                else:
+                    new.extend(["-q:v", qv])
+            except Exception:
+                pass
+            # fps filter（若未指定）
+            try:
+                mf = int(opts.get('max_fps', 0))
+                has_fps = any(isinstance(x, str) and x.startswith('fps=') for x in new)
+                if mf > 0 and "-filter:v" not in new and not has_fps:
+                    new.extend(["-filter:v", f"fps={mf}"])
+            except Exception:
+                pass
+            return new
+        except Exception:
+            return args

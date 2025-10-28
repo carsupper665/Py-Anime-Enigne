@@ -11,6 +11,7 @@ from .add_page import AddPage
 from .edit_page import EditPage
 from .settings_page import SettingsPage
 from .preview_dialog import PreviewImageDialog
+from .osd import OSD
 
 INFO = "info"
 WARN = "warn"
@@ -25,5 +26,7 @@ __all__ = ["NavBar", "LoadingPage", "HomePage", "Toast",
            "AddPage", "COLOR", "GifLoader", "MediaInfo", 
            "EditPage", "connect_crash_dialog", "MainApp",
             "install_global_handlers", "RmbgThread",
-            "LoadingToast", "FFmpegNotFoundError", "SettingsPage", "ProcessingQueue", "QueueJob", "PreviewImageDialog"
+            "LoadingToast", "FFmpegNotFoundError", "SettingsPage", 
+            "ProcessingQueue", "QueueJob", "PreviewImageDialog",
+            "OSD"
            ]

@@ -5,6 +5,7 @@ spec: openspec/changes/add-processing-queue/specs/processing-queue/spec.md:3
 """
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
+from .logger import loggerFactory
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -30,9 +31,11 @@ class ProcessingQueue(QObject):
         self._q: List[QueueJob] = []
         self._current: Optional[QueueJob] = None
         self._paused: bool = False
+        self.logger = loggerFactory(write_log=False, logger_name="ProcessingQueue", log_level="DEBUG").getLogger()
 
     # public API
     def enqueue(self, job: QueueJob):
+        self.logger.debug(f"Enqueuing job: {job}")
         self._q.append(job)
         self.job_enqueued.emit(job)
         if not self._current and not self._paused:
@@ -50,6 +53,7 @@ class ProcessingQueue(QObject):
     def pause(self):
         if not self._paused:
             self._paused = True
+            self.logger.debug("Processing queue paused")
             self.state_changed.emit("paused")
 
     def resume(self):
@@ -62,6 +66,7 @@ class ProcessingQueue(QObject):
     # to be called by owner when worker updates
     def notify_progress(self, p: dict):
         if self._current:
+            self.logger.debug(f"Job progress: {self._current}, {p}")
             self.job_progress.emit(self._current, p)
 
     def notify_finished(self, payload: dict):
@@ -72,6 +77,7 @@ class ProcessingQueue(QObject):
             self.state_changed.emit("paused")
             return
         self._start_next()
+        self.logger.debug(f"Job finished {self._current}, starting next if available")
 
     def notify_error(self, exc: object):
         if self._current:

@@ -37,6 +37,10 @@ def get_default_config() -> Dict[str, Any]:
             "image": "webp",   # png | webp
             "anim": "webp",    # webp | gif
             "dir": "./animes",
+            # 通用輸出參數（Save Dialog 預設值）
+            "quality": 75,
+            "max_fps": 15,
+            "loop": True,
         },
         # 規格：影片輸出固定為 animated-webp（不含音訊/背景合成選項）
         "video": {
