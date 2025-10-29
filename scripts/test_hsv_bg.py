@@ -4,7 +4,13 @@ import os
 import argparse
 import sys
 from pathlib import Path
-import cv2
+try:
+    import cv2
+except ModuleNotFoundError:  # pragma: no cover
+    cv2 = None
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        import pytest
+        pytest.skip("OpenCV (cv2) not installed", allow_module_level=True)
 import numpy as np
 
 # ensure repo root on path
@@ -40,6 +46,8 @@ def overlay_preview(bgr: np.ndarray, alpha: np.ndarray) -> np.ndarray:
 
 
 def main():
+    if cv2 is None:
+        raise SystemExit("OpenCV (cv2) 未安裝，無法執行此腳本。")
     ap = argparse.ArgumentParser(description="Test core.hsv_bg.compute_alpha")
     ap.add_argument('--input', '-i', help='Input image path. If omitted, use synthetic sample.')
     ap.add_argument('--outdir', '-o', default='./_tmp_hsv_test', help='Output directory')

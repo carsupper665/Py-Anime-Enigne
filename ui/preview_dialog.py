@@ -1,52 +1,46 @@
-from __future__ import annotations
+﻿from __future__ import annotations
+import os
 from typing import Optional, Callable
+
 from PyQt6.QtCore import Qt, pyqtSignal, QEvent
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QSlider
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QImageReader
-import numpy as np
-import cv2
-import os
-from collections import OrderedDict
+
+from core.export_context import ExportOptions
+from ui.services.preview_service import PreviewService, PreviewFrame
+
+VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
 
 
 class PreviewImageDialog(QDialog):
-    """影片模式單影格預覽 + HSV 預覽 + 魔術棒取樣。
-
-    - 顯示目前影格（圖片）。
-    - 可切換/調整 HSV 參數並覆蓋預覽遮色。
-    - 可點擊取樣（記錄 wand seed）。
-    - 可重新擷取影格（由外部 refresh_fn 提供）。
-
-    訊號：
-    - hsvChanged(dict)
-    - seedSelected(tuple[int,int])
-    """
-
     hsvChanged = pyqtSignal(dict)
     seedSelected = pyqtSignal(object)
 
-    def __init__(self, img_path: str, refresh_fn: Optional[Callable[[], Optional[str]]] = None,
-                 init_hsv: Optional[dict] = None, init_ms: Optional[int] = None, parent=None):
+    def __init__(
+        self,
+        img_path: str,
+        refresh_fn: Optional[Callable[[], Optional[str]]] = None,
+        init_hsv: Optional[dict] = None,
+        init_ms: Optional[int] = None,
+        export_options: Optional[ExportOptions] = None,
+        service: Optional[PreviewService] = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("影格預覽")
         self.setModal(True)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet("QWidget { background:#222; color:#fff; font-family:'Source Han Sans TC'; }")
 
-        self._img_path = img_path
-        self._src_path = img_path  # 兼容命名，新增影片/動圖模式
+        self._path = img_path
         self._refresh_fn = refresh_fn
-        self._seed: Optional[tuple[int,int]] = None
-        self._hsv = {
-            "tol_h": 10, "tol_s": 60, "tol_v": 60,
-            "strength": 1.5,
-            "erode_iter": 1, "dilate_iter": 0,
-            "feather_px": 2.0,
-        }
-        if isinstance(init_hsv, dict):
-            self._hsv.update({k: init_hsv.get(k, self._hsv[k]) for k in self._hsv.keys()})
+        self._service = service or PreviewService()
+        self._export_options = export_options
+        self._current_preview: Optional[PreviewFrame] = None
 
-        v = QVBoxLayout(self); v.setContentsMargins(12, 12, 12, 12); v.setSpacing(8)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(12, 12, 12, 12)
+        v.setSpacing(8)
 
         self.info = QLabel("點擊圖片以取樣（魔術棒 seed）/ 調整 HSV 預覽")
         v.addWidget(self.info)
@@ -58,7 +52,6 @@ class PreviewImageDialog(QDialog):
         v.addWidget(self.view, 1)
         self.view.installEventFilter(self)
 
-        # 幀選擇 UI（影片/動圖模式下顯示）
         row_f = QHBoxLayout()
         self.frame_label = QLabel("Frame: -/-  (00:00)")
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
@@ -67,22 +60,20 @@ class PreviewImageDialog(QDialog):
         row_f.addWidget(self.frame_slider)
         v.addLayout(row_f)
 
-        # HSV 控制
         row1 = QHBoxLayout()
-        self.sl_h = QSlider(Qt.Orientation.Horizontal); self.sl_h.setRange(1, 60); self.sl_h.setValue(int(self._hsv["tol_h"]))
-        self.sl_s = QSlider(Qt.Orientation.Horizontal); self.sl_s.setRange(1, 100); self.sl_s.setValue(int(self._hsv["tol_s"]))
-        self.sl_v = QSlider(Qt.Orientation.Horizontal); self.sl_v.setRange(1, 100); self.sl_v.setValue(int(self._hsv["tol_v"]))
+        self.sl_h = QSlider(Qt.Orientation.Horizontal); self.sl_h.setRange(1, 60)
+        self.sl_s = QSlider(Qt.Orientation.Horizontal); self.sl_s.setRange(1, 100)
+        self.sl_v = QSlider(Qt.Orientation.Horizontal); self.sl_v.setRange(1, 100)
         row1.addWidget(QLabel("H")); row1.addWidget(self.sl_h)
         row1.addWidget(QLabel("S")); row1.addWidget(self.sl_s)
         row1.addWidget(QLabel("V")); row1.addWidget(self.sl_v)
         v.addLayout(row1)
 
         row2 = QHBoxLayout()
-        self.sl_strength = QSlider(Qt.Orientation.Horizontal); self.sl_strength.setRange(50, 300); self.sl_strength.setValue(int(float(self._hsv["strength"]) * 100))
+        self.sl_strength = QSlider(Qt.Orientation.Horizontal); self.sl_strength.setRange(50, 300)
         row2.addWidget(QLabel("倍率")); row2.addWidget(self.sl_strength)
         v.addLayout(row2)
 
-        # 操作按鈕
         btns = QHBoxLayout(); btns.addStretch(1)
         self.btn_reload = QPushButton("重新擷取")
         self.btn_apply_hsv = QPushButton("套用到控制")
@@ -98,179 +89,138 @@ class PreviewImageDialog(QDialog):
         self.btn_use_seed.clicked.connect(self._on_use_seed)
         self.btn_close.clicked.connect(self.accept)
 
-        for s in (self.sl_h, self.sl_s, self.sl_v, self.sl_strength):
-            s.valueChanged.connect(self._update_hsv_preview)
-
-        # 媒體屬性
-        self._is_video = False
-        self._is_animated_image = False
-        self._total_frames = 1
-        self._fps = 0.0
-        self._current_frame = 0
-        self._init_ms = int(init_ms) if isinstance(init_ms, (int, float)) else None
-        self._reader = None
-        self._cap = None
-        # LRU frame cache (keep last 3 frames)
-        self._frame_cache: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
-        self._cache_cap = 3
-
-        # 連動
+        for slider, key in (
+            (self.sl_h, "tol_h"),
+            (self.sl_s, "tol_s"),
+            (self.sl_v, "tol_v"),
+        ):
+            slider.valueChanged.connect(lambda value, k=key: self._on_hsv_change(k, value))
+        self.sl_strength.valueChanged.connect(lambda value: self._on_hsv_change("strength", value / 100.0))
         self.frame_slider.valueChanged.connect(self._on_seek_frame)
 
-        # 初始化媒體並載入
-        self._init_media()
-        self._load_current()
+        self._prepare_source(img_path)
+        if init_hsv:
+            for key, value in init_hsv.items():
+                if key in self._service.get_state().hsv:
+                    self._service.update_hsv(key, float(value))
+        self._apply_hsv_to_sliders()
 
-    def _load(self, path: str):
-        self._bgr = cv2.imread(path, cv2.IMREAD_COLOR)
-        if self._bgr is None:
-            self.view.setText("讀取圖片失敗")
+        if init_ms and self._service.get_source_info()["fps"] > 0:
+            fps = self._service.get_source_info()["fps"]
+            frame_index = int(max(0, init_ms / 1000.0) * fps)
+            self._service.seek(frame_index)
+
+        self._render_current_frame()
+
+    # --- Source preparation ---
+    def _prepare_source(self, path: str) -> None:
+        ext = os.path.splitext(path)[1].lower()
+        if ext in VIDEO_EXTS:
+            self._service.set_video_source(path)
+        else:
+            reader = QImageReader(path)
+            reader.setDecideFormatFromContent(True)
+            if reader.supportsAnimation():
+                self._service.set_animated_source(path)
+            else:
+                self._service.set_static_source(path)
+        self._sync_slider()
+
+    def _sync_slider(self) -> None:
+        info = self._service.get_source_info()
+        total = max(1, int(info["total_frames"]))
+        self.frame_slider.blockSignals(True)
+        self.frame_slider.setRange(0, total - 1)
+        self.frame_slider.setValue(int(self._service.get_state().current_frame))
+        self.frame_slider.blockSignals(False)
+        show_slider = total > 1
+        self.frame_slider.setVisible(show_slider)
+        self.frame_label.setVisible(show_slider)
+        self._update_frame_label()
+
+    # --- Rendering ---
+    def _render_current_frame(self) -> None:
+        try:
+            frame = self._service.load_current_frame(apply_hsv=True)
+        except Exception as exc:
+            self.view.setText(str(exc))
             return
-        rgb = cv2.cvtColor(self._bgr, cv2.COLOR_BGR2RGB)
-        h, w = rgb.shape[:2]
-        self._qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
-        self._set_display(self._qimg)
-        self._update_hsv_preview()
+        self._current_preview = frame
+        self._display_frame(frame)
+        self._update_frame_label()
 
-    def _set_display(self, qimg: QImage, overlay: Optional[QImage] = None):
-        pix = QPixmap.fromImage(qimg)
-        scaled = pix.scaled(self.view.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-        if overlay is not None:
-            ov = QImage(overlay)
-            ov = ov.scaled(scaled.size(), Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            out = QPixmap(scaled.size()); out.fill(Qt.GlobalColor.transparent)
-            p = QPainter(out)
-            p.drawPixmap(0, 0, scaled)
-            p.drawImage(0, 0, ov)
-            p.end()
-            self.view.setPixmap(out)
+    def _display_frame(self, frame: PreviewFrame) -> None:
+        pixmap = QPixmap.fromImage(frame.image)
+        scaled = pixmap.scaled(
+            self.view.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        if frame.overlay is not None:
+            overlay = frame.overlay.scaled(
+                scaled.size(),
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            canvas = QPixmap(scaled.size())
+            canvas.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(canvas)
+            painter.drawPixmap(0, 0, scaled)
+            painter.drawImage(0, 0, overlay)
+            painter.end()
+            self.view.setPixmap(canvas)
         else:
             self.view.setPixmap(scaled)
 
-    def resizeEvent(self, ev):
-        super().resizeEvent(ev)
-        if hasattr(self, "_qimg"):
-            self._set_display(self._qimg)
-
-    def eventFilter(self, obj, ev):
-        if obj is self.view and ev.type() == QEvent.Type.MouseButtonPress and hasattr(self, "_bgr") and self._bgr is not None:
-            # 轉換座標到原圖
-            pos = ev.position().toPoint()
-            label_size = self.view.size()
-            view_w = max(1, label_size.width() - 16)
-            view_h = max(1, label_size.height() - 16)
-            h, w = self._bgr.shape[:2]
-            k = min(view_w / w, view_h / h)
-            disp_w, disp_h = int(w * k), int(h * k)
-            off_x = (label_size.width() - disp_w) // 2
-            off_y = (label_size.height() - disp_h) // 2
-            x = pos.x() - off_x; y = pos.y() - off_y
-            if 0 <= x < disp_w and 0 <= y < disp_h:
-                sx, sy = int(x / k), int(y / k)
-                self._seed = (sx, sy)
-                self.info.setText(f"Seed: ({sx},{sy})  H={self.sl_h.value()} S={self.sl_s.value()} V={self.sl_v.value()}")
-        return super().eventFilter(obj, ev)
-
-    def _update_hsv_preview(self):
-        if not hasattr(self, "_bgr") or self._bgr is None:
-            return
-        from core.hsv_bg import compute_alpha
-        s = self.sl_strength.value() / 100.0
-        opts = {
-            "tol_h": int(self.sl_h.value()),
-            "tol_s": int(self.sl_s.value()),
-            "tol_v": int(self.sl_v.value()),
-            "strength": float(s),
-            "erode_iter": 1,
-            "dilate_iter": 0,
-            "feather_px": 2.0,
-        }
-        try:
-            alpha = compute_alpha(self._bgr.copy(), opts)
-            h, w = alpha.shape[:2]
-            ov = np.zeros((h, w, 4), dtype=np.uint8)
-            ov[..., 1] = 255
-            ov[..., 3] = (alpha > 0).astype(np.uint8) * 90
-            qov = QImage(ov.data, w, h, 4 * w, QImage.Format.Format_RGBA8888)
-            self._set_display(self._qimg, qov)
-        except Exception:
-            self._set_display(self._qimg)
-
-    def _on_reload(self):
-        # 若外部提供 refresh_fn，沿用舊行為；否則依目前模式重載當前幀
-        if self._refresh_fn is not None:
-            new_path = self._refresh_fn() or self._img_path
-            self._img_path = new_path
-            self._src_path = new_path
-            # 切回圖片模式
-            self._is_video = False
-            self._is_animated_image = False
-            # 隱藏幀 UI
-            if hasattr(self, 'frame_slider'):
-                self.frame_slider.setVisible(False)
-            if hasattr(self, 'frame_label'):
-                self.frame_label.setVisible(False)
-            self._load(self._img_path)
-        else:
-            self._load_current()
-
-    def _on_apply_hsv(self):
-        s = self.sl_strength.value() / 100.0
-        payload = {"tol_h": int(self.sl_h.value()), "tol_s": int(self.sl_s.value()), "tol_v": int(self.sl_v.value()), "strength": float(s)}
-        self.hsvChanged.emit(payload)
-
-    def _on_use_seed(self):
-        if self._seed is not None:
-            self.seedSelected.emit(self._seed)
-
-    # ---------- 影片/動圖幀選擇支援 ----------
-    def _init_media(self):
-        path = self._src_path
-        ext = os.path.splitext(path)[1].lower()
-        video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
-        try:
-            if ext in video_exts:
-                self._is_video = True
-                self._cap = cv2.VideoCapture(path)
-                if not self._cap.isOpened():
-                    raise RuntimeError("cannot open video")
-                frames = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-                fps = float(self._cap.get(cv2.CAP_PROP_FPS) or 0.0)
-                self._total_frames = max(1, frames)
-                self._fps = fps if fps > 0 else 15.0
-                if self._init_ms is not None and self._fps > 0:
-                    self._current_frame = min(self._total_frames-1, max(0, int(round(self._init_ms * self._fps / 1000.0))))
-                self._setup_frame_ui(True)
-            else:
-                r = QImageReader(path)
-                r.setDecideFormatFromContent(True)
-                self._reader = r
-                if r.supportsAnimation():
-                    self._is_animated_image = True
-                    cnt = r.imageCount()
-                    self._total_frames = cnt if cnt and cnt > 0 else 1
-                    self._fps = 0.0
-                    self._setup_frame_ui(True)
-                else:
-                    self._setup_frame_ui(False)
-        except Exception:
-            self._is_video = False
-            self._is_animated_image = False
-            self._setup_frame_ui(False)
-
-    def _setup_frame_ui(self, show: bool):
-        self.frame_slider.setVisible(show)
-        self.frame_label.setVisible(show)
-        if show:
-            self.frame_slider.blockSignals(True)
-            self.frame_slider.setRange(0, max(0, self._total_frames - 1))
-            self.frame_slider.setValue(int(self._current_frame))
-            self.frame_slider.blockSignals(False)
-            self._update_frame_label()
+    def _update_frame_label(self) -> None:
+        info = self._service.get_source_info()
+        state = self._service.get_state()
+        if info["is_video"] and info["fps"] > 0:
+            seconds = state.current_frame / info["fps"]
+            self.frame_label.setText(
+                f"Frame: {state.current_frame + 1}/{max(1, info['total_frames'])}  ({self._format_time(seconds)})"
+            )
+        elif info["is_animated"]:
+            self.frame_label.setText(f"Frame: {state.current_frame + 1}/{max(1, info['total_frames'])}")
         else:
             self.frame_label.setText("Frame: -/-  (00:00)")
 
-    def _hhmmss(self, seconds: float) -> str:
+    # --- HSV handlers ---
+    def _apply_hsv_to_sliders(self) -> None:
+        state = self._service.get_state()
+        self.sl_h.setValue(int(state.hsv["tol_h"]))
+        self.sl_s.setValue(int(state.hsv["tol_s"]))
+        self.sl_v.setValue(int(state.hsv["tol_v"]))
+        self.sl_strength.setValue(int(float(state.hsv["strength"]) * 100))
+
+    def _on_hsv_change(self, key: str, value: float) -> None:
+        self._service.update_hsv(key, value)
+        self._render_current_frame()
+
+    # --- Slots ---
+    def _on_seek_frame(self, index: int) -> None:
+        self._service.seek(int(index))
+        self._render_current_frame()
+
+    def _on_reload(self) -> None:
+        if not self._refresh_fn:
+            return
+        new_path = self._refresh_fn()
+        if not new_path:
+            return
+        self._path = new_path
+        self._service.clear_cache()
+        self._prepare_source(new_path)
+        self._render_current_frame()
+
+    def _on_apply_hsv(self) -> None:
+        self.hsvChanged.emit(dict(self._service.get_state().hsv))
+
+    def _on_use_seed(self) -> None:
+        self.seedSelected.emit(self._service.get_state().seed)
+
+    # --- Utilities ---
+    def _format_time(self, seconds: float) -> str:
         seconds = max(0, int(seconds))
         m, s = divmod(seconds, 60)
         h, m = divmod(m, 60)
@@ -278,107 +228,36 @@ class PreviewImageDialog(QDialog):
             return f"{h:02d}:{m:02d}:{s:02d}"
         return f"{m:02d}:{s:02d}"
 
-    def _update_frame_label(self):
-        if self._is_video and self._fps > 0:
-            t = self._current_frame / self._fps
-            self.frame_label.setText(f"Frame: {self._current_frame+1}/{self._total_frames}  ({self._hhmmss(t)})")
-        elif self._is_animated_image:
-            self.frame_label.setText(f"Frame: {self._current_frame+1}/{self._total_frames}")
-        else:
-            self.frame_label.setText("Frame: -/-  (00:00)")
-
-    def _on_seek_frame(self, v: int):
-        self._current_frame = int(v)
-        self._update_frame_label()
-        try:
-            self.info.setText("Loading…")
-        except Exception:
-            pass
-        self._load_current()
-
-    def _load_current(self):
-        if self._is_video:
-            self._bgr = self._read_video_frame(self._current_frame)
-        elif self._is_animated_image:
-            self._bgr = self._read_animated_image_frame(self._current_frame)
-        else:
-            self._bgr = cv2.imread(self._src_path, cv2.IMREAD_COLOR)
-        if self._bgr is None:
-            self.view.setText("讀取影像失敗")
-            return
-        rgb = cv2.cvtColor(self._bgr, cv2.COLOR_BGR2RGB)
-        h, w = rgb.shape[:2]
-        self._qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
-        self._set_display(self._qimg)
-        self._update_hsv_preview()
-
-    def _read_video_frame(self, index: int):
-        try:
-            key = ("vid", int(index))
-            c = self._cache_get(key)
-            if c is not None:
-                return c
-            if self._cap is None or not self._cap.isOpened():
-                return None
-            self._cap.set(cv2.CAP_PROP_POS_FRAMES, float(index))
-            ok, frame = self._cap.read()
-            if ok and frame is not None:
-                if frame.ndim == 2:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                elif frame.shape[2] == 4:
-                    frame = frame[:, :, :3]
-                self._cache_put(key, frame)
-                return frame
-            return None
-        except Exception:
-            return None
-
-    def _read_animated_image_frame(self, index: int):
-        try:
-            r = self._reader
-            if r is None:
-                return None
-            key = ("anim", int(index))
-            c = self._cache_get(key)
-            if c is not None:
-                return c
-            try:
-                if hasattr(r, 'jumpToImage') and r.jumpToImage(int(index)):
+    def eventFilter(self, obj, ev):
+        if obj is self.view and ev.type() == QEvent.Type.MouseButtonPress and self._current_preview is not None:
+            pos = ev.position().toPoint()
+            mapped = self._map_click_to_image(pos)
+            if mapped is not None:
+                self._service.update_seed(mapped)
+                self.seedSelected.emit(mapped)
+                try:
+                    self.info.setText(f"Seed: {mapped}  H={self.sl_h.value()} S={self.sl_s.value()} V={self.sl_v.value()}")
+                except Exception:
                     pass
-                elif hasattr(r, 'setCurrentImageNumber'):
-                    r.setCurrentImageNumber(int(index))
-            except Exception:
-                pass
-            img = r.read()
-            if img is None or img.isNull():
-                return None
-            img = img.convertToFormat(QImage.Format.Format_RGB888)
-            w = img.width(); h = img.height()
-            ptr = img.bits(); ptr.setsize(h * w * 3)
-            arr = np.frombuffer(ptr, np.uint8).reshape((h, w, 3))
-            bgr = arr[:, :, ::-1].copy()
-            self._cache_put(key, bgr)
-            return bgr
-        except Exception:
-            return None
+                self._render_current_frame()
+        return super().eventFilter(obj, ev)
 
-    # ----- LRU cache helpers -----
-    def _cache_get(self, key: tuple):
-        try:
-            if key in self._frame_cache:
-                val = self._frame_cache.pop(key)
-                self._frame_cache[key] = val
-                return val
-        except Exception:
+    def _map_click_to_image(self, pt):
+        if self._current_preview is None:
             return None
-        return None
-
-    def _cache_put(self, key: tuple, frame: np.ndarray):
-        try:
-            if key in self._frame_cache:
-                self._frame_cache.pop(key)
-            self._frame_cache[key] = frame
-            while len(self._frame_cache) > int(self._cache_cap):
-                self._frame_cache.popitem(last=False)
-        except Exception:
-            pass
+        qimg = self._current_preview.image
+        label_size = self.view.size()
+        view_w = max(1, label_size.width() - 16)
+        view_h = max(1, label_size.height() - 16)
+        src_w, src_h = qimg.width(), qimg.height()
+        k = min(view_w / src_w, view_h / src_h)
+        disp_w, disp_h = int(src_w * k), int(src_h * k)
+        off_x = (label_size.width() - disp_w) // 2
+        off_y = (label_size.height() - disp_h) // 2
+        x = pt.x() - off_x
+        y = pt.y() - off_y
+        if x < 0 or y < 0 or x >= disp_w or y >= disp_h:
+            return None
+        src_x = int(x / k)
+        src_y = int(y / k)
+        return (src_x, src_y)

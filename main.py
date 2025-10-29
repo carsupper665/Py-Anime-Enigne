@@ -5,12 +5,22 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import (QFont,)
 from PyQt6.QtCore import (Qt, pyqtSlot, QThread,)
+import logging
 import sys
 from ui import *
 from core.config import load_config, save_config
+from core.export_context import (
+    ExportContextError,
+    build_export_context,
+)
+from core.diagnostics import (
+    attach_diagnostic,
+    format_user_message,
+    generate_diagnostic_id,
+    log_structured,
+)
 import os
 
-import sys
 
 class Main(QMainWindow):
     def __init__(self, level: str | int="DEBUG", save_log: bool=False, scale: int=70):
@@ -104,60 +114,33 @@ class Main(QMainWindow):
             self._suppress_rmbg_loading = False
         else:
             self.toast_loading.show_loading(title="Removeing BG")
-        self.logger.debug("Removeing BG")
-        if prefer == "":
-            prefer = "auto"
-        # 套用設定：引擎與輸出目錄
-        out_dir = self.config.get("output", {}).get("dir", "./animes")
-        engine = (prefer or self.config.get("engine", "hsv")).lower()
-        # OpenVINO 模型（若有）
-        ov_model = self.config.get("openvino", {}).get("model_path", "").strip()
-        if ov_model:
-            os.environ["RMBG_MODEL_PATH"] = ov_model
-        # 設定覆寫邏輯：HomePage 可傳入臨時 HSV 配置；wand 直接傳 seed 與參數
-        hsv_cfg = self.config.get("hsv", {})
-        if engine == "hsv" and isinstance(opts, dict) and "hsv" in opts:
-            hsv_cfg = opts.get("hsv", {})
-        wand_cfg = opts if engine == "wand" else None
-        img_fmt = self.config.get("output", {}).get("image", "webp").lower()
-        # 規格：影片/動圖固定輸出 animated-webp；在這裡仍傳給 API，但 worker 會強制 webp
-        anim_fmt = "webp"
-        # 傳遞時間範圍（ms），若有設定
-        rng = None
+        payload_opts = dict(opts or {})
+        diagnostic_id = payload_opts.get("diagnostic_id") or generate_diagnostic_id()
+        payload_opts["diagnostic_id"] = diagnostic_id
+        log_structured(self.logger, logging.INFO, diagnostic_id, "rmbg.request", src=src, prefer=prefer)
         try:
-            if isinstance(opts, dict) and isinstance(opts.get('range'), dict):
-                rin = opts['range'].get('in_ms', None)
-                rout = opts['range'].get('out_ms', None)
-                if rin is not None or rout is not None:
-                    rin = int(rin) if rin is not None else None
-                    rout = int(rout) if rout is not None else None
-                    rng = (rin, rout)
-        except Exception:
-            rng = None
-        # 匯出參數優先由 HomePage 傳入（opts.export），否則回退 config 通用設定
-        export_opts = opts.get('export') if isinstance(opts, dict) else None
-        if not isinstance(export_opts, dict):
-            try:
-                out_cfg = self.config.get("output", {}) if isinstance(self.config, dict) else {}
-                export_opts = {
-                    "quality": int(out_cfg.get("quality", 75)),
-                    # max_fps = 0 代表自動（不約束），>0 則限縮
-                    "max_fps": int(out_cfg.get("max_fps", 15)),
-                    "loop": bool(out_cfg.get("loop", True)),
-                }
-            except Exception:
-                export_opts = {"quality": 75, "max_fps": 15, "loop": True}
+            context = build_export_context(src, prefer, payload_opts, self.config)
+        except ExportContextError as err:
+            self._on_exception(err)
+            return
+        # 設定環境變數（目前僅 OpenVINO 模型路徑）
+        for key, value in context.env.items():
+            if value:
+                os.environ[key] = value
+        request = context.request
+
         self.rmbg_thread.remove_bg(
-            src_path=src,
-            out_dir=out_dir,
-            prefer=prefer,
-            engine=engine,
-            hsv_cfg=hsv_cfg,
-            wand=wand_cfg,
-            image_format=img_fmt,
-            anim_format=anim_fmt,
-            range_ms=rng,
-            export_opts=export_opts,
+            src_path=request.src_path,
+            out_dir=request.output_dir,
+            prefer=request.prefer,
+            engine=request.engine,
+            hsv_cfg=request.hsv_config,
+            wand=request.wand_config,
+            image_format=request.image_format,
+            anim_format=request.anim_format,
+            range_ms=request.range_ms,
+            export_opts=request.options.to_dict(),
+            diagnostic_id=diagnostic_id,
         )
 
     # ----- Queue + LoadingToast integration -----
@@ -169,6 +152,12 @@ class Main(QMainWindow):
             total = max(1, getattr(self, '_queue_pending', 0) + 1)
             title = f"Processing {self._queue_started_count}/{total}"
             msg = os.path.basename(getattr(job, 'src', ''))
+            diagnostic_id = getattr(job, 'diagnostic_id', None)
+            if not diagnostic_id and isinstance(getattr(job, 'opts', None), dict):
+                diagnostic_id = job.opts.get('diagnostic_id')
+            if diagnostic_id:
+                msg = f"{msg} (ID {diagnostic_id})"
+            log_structured(self.logger, logging.INFO, diagnostic_id, "queue.job.started", src=getattr(job, 'src', ''), prefer=getattr(job, 'prefer', ''))
             # 抑制 _on_rmbg 再次顯示 loading
             self._suppress_rmbg_loading = True
             self.toast_loading.show_loading(title=title, message=msg)
@@ -188,11 +177,18 @@ class Main(QMainWindow):
 
     @pyqtSlot(dict) # {input, output, kind, frames?, manifest?}
     def _rmbg_finished(self, payload: dict):
-        _input = payload.get("input"); _output = payload.get("output"); _kind = payload.get("kind"); _frames = payload.get("frames", None); _manifest = payload.get("manifest", None)
-        self.logger.debug(f"input: {_input}\noutput:{_output}\nkind{_kind}")
-        self.logger.debug(f"frames: {_frames}, manifest{_manifest}")
+        _input = payload.get("input")
+        _output = payload.get("output")
+        _kind = payload.get("kind")
+        _frames = payload.get("frames", None)
+        _manifest = payload.get("manifest", None)
+        diagnostic_id = payload.get("diagnostic_id")
+        log_structured(self.logger, logging.INFO, diagnostic_id, "rmbg.finished", input=_input, output=_output, kind=_kind, frames=_frames)
         self.gif_loader.reload()
-        self.toast.show_notice(INFO, title="File Saved", message=f"input: {_input}\noutput:{_output}\nkind{_kind}", px=self._get_x(), py=self._get_y())
+        message = f"input: {_input}\noutput:{_output}\nkind{_kind}"
+        if diagnostic_id:
+            message = f"{message}\n追蹤：{diagnostic_id}"
+        self.toast.show_notice(INFO, title="File Saved", message=message, px=self._get_x(), py=self._get_y())
 
     @pyqtSlot(dict)
     def reload_anime_data(self, data):
@@ -366,10 +362,11 @@ class Main(QMainWindow):
     @pyqtSlot(str, str, dict)
     def _on_enqueue_job(self, src: str, prefer: str, opts: dict):
         try:
+            payload_opts = dict(opts or {})
             # 可選：持久化最近的 HSV 設定
-            if prefer == 'hsv' and isinstance(opts, dict) and 'hsv' in opts:
+            if prefer == 'hsv' and 'hsv' in payload_opts:
                 hcfg = self.config.get('hsv', {})
-                hcfg.update(opts['hsv'])
+                hcfg.update(payload_opts['hsv'])
                 self.config['hsv'] = hcfg
                 # OpenSpec: add-processing-queue — persist last engine options
                 # spec: openspec/changes/add-processing-queue/tasks.md:1
@@ -377,9 +374,17 @@ class Main(QMainWindow):
                     save_config(self.config)
                 except Exception:
                     pass
+            diagnostic_id = payload_opts.get('diagnostic_id') or generate_diagnostic_id()
+            payload_opts['diagnostic_id'] = diagnostic_id
             # 入列
-            self.queue.enqueue(QueueJob(src=src, prefer=prefer or 'auto', opts=opts or {}))
-            self.toast.show_notice(INFO, "已加入佇列", f"{os.path.basename(src)}", px=self._get_x(), py=self._get_y())
+            self.queue.enqueue(
+                QueueJob(src=src, prefer=prefer or 'auto', opts=payload_opts, diagnostic_id=diagnostic_id)
+            )
+            message = os.path.basename(src)
+            if diagnostic_id:
+                message = f"{message}\n追蹤：{diagnostic_id}"
+            log_structured(self.logger, logging.INFO, diagnostic_id, "queue.enqueue", src=src, prefer=prefer or 'auto')
+            self.toast.show_notice(INFO, "已加入佇列", message, px=self._get_x(), py=self._get_y())
         except Exception as e:
             self._on_exception(e)
 
@@ -402,15 +407,18 @@ class Main(QMainWindow):
     @pyqtSlot(Exception)
     def _on_exception(self,e: Exception):
         self.toast_loading.on_exception_cancel()
+        diagnostic_id = getattr(e, "diagnostic_id", None)
+        user_message = format_user_message(str(e), diagnostic_id)
+        log_structured(self.logger, logging.ERROR, diagnostic_id, "app.exception", error=user_message)
         if isinstance(e, FFmpegNotFoundError):
-            self.toast.show_notice(ERROR, "FFmpeg Not Found", str(e), 10000, px=self._get_x(), py=self._get_y())
+            self.toast.show_notice(ERROR, "FFmpeg Not Found", user_message, 10000, px=self._get_x(), py=self._get_y())
             return
         self.hide()
         import traceback
         exctype = type(e)
         tb_text = "".join(traceback.TracebackException.from_exception(e).format())
         title ="App Crash Exception"
-        self.toast.show_notice(FATAL, title, e, 60000, traceback=tb_text)
+        self.toast.show_notice(FATAL, title, user_message, 60000, traceback=tb_text)
         sys.__excepthook__(exctype, e, traceback)
 
 def main():
@@ -419,10 +427,11 @@ def main():
     install_global_handlers(app)
     connect_crash_dialog(app)
     app.setFont(QFont(r'./src/fonts'))
-    window = Main()
+    window = Main(level="DEBUG")
     window.show()
 
     sys.exit(app.exec())
 
 if __name__ == '__main__':
     main()
+

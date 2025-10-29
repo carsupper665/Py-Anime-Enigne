@@ -1,5 +1,6 @@
-import time
-import types
+import pytest
+
+pytest.importorskip("pytestqt")
 
 from ui.queue import ProcessingQueue, QueueJob
 

@@ -1,4 +1,7 @@
 ﻿# ui/home_page.py
+from dataclasses import dataclass, replace
+from typing import Any, Dict, Optional, Tuple
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QFileDialog, QSplitter,
     QInputDialog, QMessageBox, QSlider, QStackedLayout, QWidget as QW, QCheckBox,
@@ -16,7 +19,15 @@ except Exception:
     QAudioOutput = None  # type: ignore
     QVideoWidget = None  # type: ignore
     _MULTIMEDIA_AVAILABLE = False
+import logging
 import os, shutil, subprocess
+from core.export_context import ExportOptions, merge_export_settings
+from core.export.services import (
+    ExportCommandBuilder,
+    TempDirectoryManager,
+    VideoExportService,
+)
+from core.diagnostics import attach_diagnostic, generate_diagnostic_id, log_structured
 
 _BTN_STYLE = """
     QPushButton {
@@ -44,6 +55,25 @@ VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
 _ALL_VIDEO_EXTS = set(VIDEO_EXTS)
 _EXTS = ["gif", "webp", "png"]
 
+
+@dataclass
+class SaveDialogResult:
+    filename: str
+    options: ExportOptions
+
+
+@dataclass
+class QueueJobPayload:
+    src: str
+    prefer: str
+    opts: Dict[str, Any]
+    diagnostic_id: str
+
+
+@dataclass
+class SavePlan:
+    queue_job: QueueJobPayload
+
 class HomePage(QWidget):
     update_data = pyqtSignal()
     on_exception = pyqtSignal(object)
@@ -57,11 +87,20 @@ class HomePage(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
         self.p = parent
+        self.logger = getattr(parent, "logger", logging.getLogger(__name__))
         self.setObjectName("HomePage")
         self._movie: QMovie | None = None
         self._current_path: str | None = None
         self.setAcceptDrops(True)
         self.setStyleSheet(_BASE)
+        self._command_builder = ExportCommandBuilder(logger=self.logger)
+        self._temp_manager = TempDirectoryManager(logger=self.logger)
+        self._video_service = VideoExportService(
+            runner=self._run_ffmpeg_command,
+            command_builder=self._command_builder,
+            logger=self.logger,
+        )
+        self._last_export_options = ExportOptions()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -427,176 +466,241 @@ class HomePage(QWidget):
         try:
             if not self._current_path:
                 return
-            orig_name = os.path.basename(self._current_path)
-            base, ext = os.path.splitext(orig_name)
-            from ui.save_dialog import SaveDialog
-            cfg = getattr(self.p, "config", {})
-            out_cfg = (cfg.get("output", {}) if isinstance(cfg, dict) else {})
-            default_q = int(out_cfg.get("quality", 75)); default_fps = int(out_cfg.get("max_fps", 15)); default_loop = bool(out_cfg.get("loop", True))
-            default_name = base + ext
-            sd = SaveDialog(self, default_name=default_name, quality=default_q, max_fps=(default_fps if default_fps>0 else 15), auto_fps=(default_fps<=0), loop=default_loop, enable_size=False)
-            if sd.exec() != 1:
+            dialog_result = self.collect_save_input()
+            if not dialog_result:
                 return
-            result = sd.result_payload()
-            name = (result.get("name") or "").strip()
-            if not name:
+            self.persist_output_settings(dialog_result.options)
+            plan = self.build_save_plan(dialog_result)
+            if not plan:
                 return
-            if os.path.splitext(name)[1] == "":
-                name += ext
-            # update config with common options
-            parent = self.p
-            if parent and hasattr(parent, "config"):
-                parent.config.setdefault("output", {})
-                parent.config["output"]["quality"] = int(result.get("quality", default_q))
-                parent.config["output"]["max_fps"] = (0 if bool(result.get("max_fps_auto", False)) else int(result.get("max_fps", (default_fps if default_fps>0 else 15))))
-                parent.config["output"]["loop"] = bool(result.get("loop", default_loop))
-                from core.config import save_config
-                save_config(parent.config)
-            # store per-run options for current save flow
-            _save_opts = {
-                "quality": int(result.get("quality", default_q)),
-                "max_fps": (0 if bool(result.get("max_fps_auto", False)) else int(result.get("max_fps", (default_fps if default_fps>0 else 15)))),
-                "loop": bool(result.get("loop", default_loop))
-            }
-            self._last_save_opts = dict(_save_opts)
-            out_dir = self._get_out_dir()
-            os.makedirs(out_dir, exist_ok=True)
-            save_path = os.path.join(out_dir, name)
-            if os.path.abspath(save_path) == os.path.abspath(self._current_path):
-                dlg = QMessageBox(self)
-                dlg.setWindowTitle("提示")
-                dlg.setText("來源與目標相同。")
-                dlg.setIcon(QMessageBox.Icon.Information)
-                # Apply local stylesheet so the dialog uses the same colors
-                try:
-                    dlg.setStyleSheet(_BASE)
-                except Exception:
-                    pass
-                dlg.exec()
-                return
-            if os.path.exists(save_path):
-                dlg = QMessageBox(self)
-                dlg.setWindowTitle("覆寫確認")
-                dlg.setText(f"檔案「{name}」已存在，是否覆寫？")
-                dlg.setIcon(QMessageBox.Icon.Question)
-                yes = dlg.addButton("是", QMessageBox.ButtonRole.YesRole)
-                no = dlg.addButton("否", QMessageBox.ButtonRole.NoRole)
-                # Apply local stylesheet so the dialog uses the same colors
-                try:
-                    dlg.setStyleSheet(_BASE)
-                except Exception:
-                    pass
-                dlg.exec()
-                if dlg.clickedButton() is not yes:
-                    return
-            if self._movie:
-                self._movie.stop()
-
-            p = name.split(".")[-1]
-
-            if self.rem_bg.isChecked():
-
-                os.makedirs('./temp', exist_ok=True)
-                
-                temp_path = os.path.join('./temp', name)
-
-                
-                shutil.copyfile(self._current_path, temp_path)
-
-                if self._movie:
-                    self._movie.start()
-                # 依引擎決定 prefer 與參數
-                prefer = getattr(self, "engine_box", None).currentText() if hasattr(self, "engine_box") else "hsv"
-                opts = {}
-                if prefer == "wand":
-                    seed = getattr(self, "_wand_seed", None)
-                    opts = {"seed": seed, "tolH": int(self.wand_tol.value()), "tolS": 60, "tolV": 60, "contiguous": True}
-                    if seed is None:
-                        self.toast.emit({"level":"warn","title":"魔術棒","message":"請先選取區域","duration":3000})
-                        return
-                elif prefer == "hsv":
-                    opts = {"hsv": {"tol_h": int(self.s_h.value()), "tol_s": int(self.s_s.value()), "tol_v": int(self.s_v.value())}}
-                # OpenSpec: update-queue-nonblocking-integration — 一律透過佇列
-
-                # 傳遞影片 in/out（毫秒）
-                if self._in_ms is not None or self._out_ms is not None:
-                    try:
-                        opts.setdefault('range', {})
-                        if self._in_ms is not None:
-                            opts['range']['in_ms'] = int(self._in_ms)
-                        if self._out_ms is not None:
-                            opts['range']['out_ms'] = int(self._out_ms)
-                    except Exception:
-                        pass
-
-                opts.setdefault('export', dict(self._last_save_opts))
-                self.enqueueJob.emit(temp_path, prefer, opts)
-                self.toast.emit({
-                    "level": "info",
-                    "title": "已加入佇列",
-                    "message": f"等待處理…",
-                    "duration": 3000,
-                })
-                return
-            
-            
-            if p in _EXTS:
-                shutil.copyfile(self._current_path, save_path)
-            else:
-                # 非支援的直拷格式：嘗試轉成 WEBP（靜態或動態）
-                try:
-                    out_webp = os.path.splitext(save_path)[0] + ".webp"
-                    src_ext = os.path.splitext(self._current_path)[1].lower()
-                    is_video_or_anim = (src_ext in VIDEO_EXTS) or (src_ext in {".apng"})
-                    # 若有入點/出點，帶入 ffmpeg 參數
-                    t_in = None if self._in_ms is None else max(0, int(self._in_ms))
-                    t_out = None if self._out_ms is None else max(0, int(self._out_ms))
-                    ok = False
-                    if is_video_or_anim:
-                        # 動態：轉成 animated webp（與規格一致）
-                        args = ["ffmpeg", "-y"]
-                        if t_in is not None:
-                            args += ["-ss", f"{t_in/1000:.3f}"]
-                        args += ["-i", self._current_path]
-                        if t_out is not None and t_out > (t_in or 0):
-                            args += ["-to", f"{t_out/1000:.3f}"]
-                        args += [
-                            "-c:v","libwebp_anim","-pix_fmt","yuva420p",
-                            "-loop","0","-q:v","75", out_webp
-                        ]
-                        ok, _ = self._ffmpeg(self._apply_export_opts(args, getattr(self, "_last_save_opts", {})))
-                    else:
-                        # 靜態：轉成 webp（無損）
-                        args = [
-                            "ffmpeg","-y","-i", self._current_path,
-                            "-c:v","libwebp","-lossless","1",
-                            "-compression_level","6","-preset","picture",
-                            out_webp
-                        ]
-                        ok, _ = self._ffmpeg(self._apply_export_opts(args, getattr(self, "_last_save_opts", {})))
-                    if not ok:
-                        self.toast.emit({
-                            "level": "error",
-                            "title": "轉檔失敗",
-                            "message": "請確認已安裝 ffmpeg 並重試。",
-                            "duration": 6000,
-                        })
-                        return
-                    save_path = out_webp
-                except Exception as _e:
-                    self.on_exception.emit(_e)
-                    return
-            if self._movie:
-                self._movie.start()
-            self.update_data.emit()
-            self.toast.emit({
-                "level": "info",
-                "title": "儲存成功",
-                "message": f"已儲存到 {os.path.relpath(save_path, os.getcwd())}",
-                "duration": 5000,
-            })
+            self.run_save_plan(plan)
         except Exception as e:
             self.on_exception.emit(e)
+
+    def collect_save_input(self) -> Optional[SaveDialogResult]:
+        if not self._current_path:
+            return None
+        from ui.save_dialog import SaveDialog
+
+        cfg = getattr(self.p, "config", {}) if hasattr(self, "p") else {}
+        defaults = merge_export_settings(cfg if isinstance(cfg, dict) else {}, None)
+        orig_name = os.path.basename(self._current_path)
+        base, _ = os.path.splitext(orig_name)
+        default_ext = ".webp"
+        default_name = base + default_ext
+        dlg = SaveDialog(
+            self,
+            default_name=default_name,
+            quality=defaults.quality,
+            max_fps=(defaults.max_fps if defaults.max_fps > 0 else 15),
+            auto_fps=(defaults.max_fps <= 0),
+            loop=defaults.loop,
+            enable_size=False,
+        )
+        if dlg.exec() != 1:
+            return None
+        payload = dlg.result_payload()
+        name = (payload.get("name") or "").strip()
+        if not name:
+            return None
+        ext = os.path.splitext(name)[1].lower()
+        if ext == "":
+            name += default_ext
+            ext = default_ext
+        profile = ext.lstrip(".") or "webp"
+
+        options = ExportOptions(
+            quality=int(payload.get("quality", defaults.quality)),
+            max_fps=0 if bool(payload.get("max_fps_auto", False)) else int(payload.get("max_fps", defaults.max_fps if defaults.max_fps > 0 else 15)),
+            loop=bool(payload.get("loop", defaults.loop)),
+            profile=profile,
+        )
+        self._last_export_options = options
+        self.toast.emit({
+            "level": "info",
+            "title": "輸出格式",
+            "message": f"輸出將以 {profile.upper()} 儲存（動圖為 animated WebP）。",
+            "duration": 2500,
+        })
+        return SaveDialogResult(filename=name, options=options)
+
+    def persist_output_settings(self, options: ExportOptions) -> None:
+        parent = self.p
+        if not parent or not hasattr(parent, "config"):
+            return
+        cfg = parent.config
+        cfg.setdefault("export", {})
+        cfg["export"].setdefault("options", {})
+        cfg["export"]["options"].update(options.to_dict())
+        cfg.setdefault("output", {})
+        cfg["output"]["quality"] = options.quality
+        cfg["output"]["max_fps"] = options.max_fps
+        cfg["output"]["loop"] = options.loop
+        try:
+            from core.config import save_config
+            save_config(cfg)
+        except Exception:
+            pass
+
+    def build_save_plan(self, result: SaveDialogResult) -> Optional[SavePlan]:
+        out_dir = self._get_out_dir()
+        os.makedirs(out_dir, exist_ok=True)
+        save_path = os.path.join(out_dir, result.filename)
+
+        if os.path.abspath(save_path) == os.path.abspath(self._current_path):
+            self._show_message("提示", "來源與目標相同。")
+            return None
+        if not self._confirm_overwrite(save_path):
+            return None
+
+        if self.rem_bg.isChecked():
+            queue_payload = self._build_queue_job(save_path, replace(result.options, target_path=None, direct_copy=False, profile=result.options.profile), prefer_override=None)
+            if queue_payload:
+                return SavePlan(queue_job=queue_payload)
+            return None
+
+        direct_copy = self._can_direct_copy(save_path)
+        adjusted_options = replace(result.options, target_path=save_path, direct_copy=direct_copy, profile=result.options.profile)
+        self._last_export_options = adjusted_options
+        queue_payload = self._build_queue_job(save_path, adjusted_options, prefer_override="none")
+        if queue_payload:
+            return SavePlan(queue_job=queue_payload)
+        return None
+
+    def run_save_plan(self, plan: SavePlan) -> None:
+        payload = plan.queue_job
+        self.enqueueJob.emit(payload.src, payload.prefer, payload.opts)
+        log_structured(
+            self.logger,
+            logging.INFO,
+            payload.diagnostic_id,
+            "queue.job.enqueued",
+            src=payload.src,
+            prefer=payload.prefer,
+        )
+        self.toast.emit({
+            "level": "info",
+            "title": "已加入佇列",
+            "message": f"等待處理…（追蹤 {payload.diagnostic_id}）",
+            "duration": 3000,
+        })
+
+    def _show_message(self, title: str, text: str) -> None:
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle(title)
+        dlg.setText(text)
+        dlg.setIcon(QMessageBox.Icon.Information)
+        try:
+            dlg.setStyleSheet(_BASE)
+        except Exception:
+            pass
+        dlg.exec()
+
+    def _confirm_overwrite(self, path: str) -> bool:
+        if not os.path.exists(path):
+            return True
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("覆寫確認")
+        dlg.setText(f"檔案「{os.path.basename(path)}」已存在，是否覆寫？")
+        dlg.setIcon(QMessageBox.Icon.Question)
+        yes = dlg.addButton("是", QMessageBox.ButtonRole.YesRole)
+        dlg.addButton("否", QMessageBox.ButtonRole.NoRole)
+        try:
+            dlg.setStyleSheet(_BASE)
+        except Exception:
+            pass
+        dlg.exec()
+        return dlg.clickedButton() is yes
+
+    def _build_queue_job(self, destination: str, options: ExportOptions, prefer_override: Optional[str]) -> Optional[QueueJobPayload]:
+        if not self._current_path:
+            return None
+        diag_id = generate_diagnostic_id()
+        if self.rem_bg.isChecked() and prefer_override is None:
+            prefer = getattr(self, "engine_box", None).currentText() if hasattr(self, "engine_box") else "hsv"
+            opts = self._collect_engine_options(prefer)
+            if opts is None:
+                return None
+            range_ms = self._collect_range()
+            if range_ms:
+                opts.setdefault("range", {})
+                if range_ms[0] is not None:
+                    opts["range"]["in_ms"] = range_ms[0]
+                if range_ms[1] is not None:
+                    opts["range"]["out_ms"] = range_ms[1]
+            opts.setdefault("export", options.to_dict())
+            opts.setdefault("diagnostic_id", diag_id)
+            temp_path = self._temp_manager.copy_to_temp(
+                self._current_path,
+                preferred_name=os.path.basename(destination),
+                persistent=True,
+                diagnostic_id=diag_id,
+            )
+            log_structured(
+                self.logger,
+                logging.INFO,
+                diag_id,
+                "queue.job.prepared",
+                src=temp_path,
+                prefer=prefer or "auto",
+                destination=destination,
+            )
+            return QueueJobPayload(src=temp_path, prefer=prefer or "auto", opts=opts, diagnostic_id=diag_id)
+
+        prefer = prefer_override or "none"
+        opts = {"export": options.to_dict(), "diagnostic_id": diag_id}
+        range_ms = self._collect_range()
+        if range_ms:
+            opts.setdefault("range", {})
+            if range_ms[0] is not None:
+                opts["range"]["in_ms"] = range_ms[0]
+            if range_ms[1] is not None:
+                opts["range"]["out_ms"] = range_ms[1]
+        temp_path = self._temp_manager.copy_to_temp(
+            self._current_path,
+            preferred_name=os.path.basename(destination),
+            persistent=True,
+            diagnostic_id=diag_id,
+        )
+        log_structured(
+            self.logger,
+            logging.INFO,
+            diag_id,
+            "queue.job.prepared",
+            src=temp_path,
+            prefer=prefer,
+            destination=destination,
+        )
+        return QueueJobPayload(src=temp_path, prefer=prefer, opts=opts, diagnostic_id=diag_id)
+
+    def _collect_engine_options(self, prefer: str) -> Optional[Dict[str, Any]]:
+        prefer = prefer or "hsv"
+        if prefer == "wand":
+            seed = getattr(self, "_wand_seed", None)
+            if seed is None:
+                self.toast.emit({"level": "warn", "title": "魔術棒", "message": "請先選取區域", "duration": 3000})
+                return None
+            return {"seed": seed, "tolH": int(self.wand_tol.value()), "tolS": 60, "tolV": 60, "contiguous": True}
+        if prefer == "hsv":
+            return {"hsv": {"tol_h": int(self.s_h.value()), "tol_s": int(self.s_s.value()), "tol_v": int(self.s_v.value())}}
+        return {}
+
+    def _collect_range(self) -> Optional[Tuple[Optional[int], Optional[int]]]:
+        if self._in_ms is None and self._out_ms is None:
+            return None
+        try:
+            start = int(self._in_ms) if self._in_ms is not None else None
+            end = int(self._out_ms) if self._out_ms is not None else None
+            return start, end
+        except Exception:
+            return None
+
+    def _can_direct_copy(self, destination: str) -> bool:
+        if not self._current_path:
+            return False
+        src_ext = os.path.splitext(self._current_path)[1].lower()
+        dest_ext = os.path.splitext(destination)[1].lower()
+        return src_ext == dest_ext and dest_ext in _EXTS
 
     def _remove_bg(self):
         pass
@@ -673,7 +777,8 @@ class HomePage(QWidget):
                 "-frames:v", "1",
                 out
             ]
-            ok, _ = self._ffmpeg(self._apply_export_opts(args, getattr(self, "_last_save_opts", {})))
+            args = self._command_builder.apply_profile(args, ExportCommandBuilder.PROFILE_WEBP, self._last_export_options)
+            ok, _ = self._ffmpeg(args)
             return out if ok else None
         except Exception:
             return None
@@ -703,6 +808,7 @@ class HomePage(QWidget):
         try:
             self.toast.emit({"level":"info","title":"預覽","message":"正在開啟預覽視窗…","duration":1500})
             from ui.preview_dialog import PreviewImageDialog
+            from ui.services.preview_service import PreviewService
             if not getattr(self, '_current_path', None):
                 self.toast.emit({"level":"error","title":"錯誤","message":"請先載入影片","duration":3000}); return
             init_hsv = {
@@ -717,7 +823,16 @@ class HomePage(QWidget):
                     init_ms = int(self.player.position())
             except Exception:
                 init_ms = None
-            dlg = PreviewImageDialog(self._current_path, refresh_fn=None, init_hsv=init_hsv, init_ms=init_ms, parent=self)
+            service = PreviewService()
+            dlg = PreviewImageDialog(
+                self._current_path,
+                refresh_fn=None,
+                init_hsv=init_hsv,
+                init_ms=init_ms,
+                export_options=self._last_export_options,
+                service=service,
+                parent=self,
+            )
             dlg.hsvChanged.connect(self._apply_hsv_from_preview)
             dlg.seedSelected.connect(self._apply_seed_from_preview)
             dlg.exec()
@@ -768,8 +883,8 @@ class HomePage(QWidget):
                 opts = {"hsv": {"tol_h": int(self.s_h.value()), "tol_s": int(self.s_s.value()), "tol_v": int(self.s_v.value())}}
             # 將臨時檔交由主程式產生後執行（沿用 _save_with_prompt 的邏輯）
             # 這裡直接用來源檔路徑，Main 會在實際執行時處理 temp 與輸出
-            if isinstance(opts, dict) and hasattr(self, "_last_save_opts"):
-                opts.setdefault('export', dict(getattr(self, '_last_save_opts', {})))
+            if isinstance(opts, dict) and hasattr(self, "_last_export_options"):
+                opts.setdefault('export', self._last_export_options.to_dict())
             self.enqueueJob.emit(self._current_path, prefer, opts)
             self._queue_pending += 1
             self.queue_label.setText(f"Queue: {self._queue_pending} pending")
@@ -905,13 +1020,18 @@ class HomePage(QWidget):
         os.makedirs(out_dir, exist_ok=True)
         return os.path.join(out_dir, text.strip())
 
-    def _ffmpeg(self, args: list[str]):
+    def _run_ffmpeg_command(self, args: list[str]) -> Tuple[bool, str]:
         try:
             proc = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
             return True, proc.stderr.decode("utf-8", "ignore")
         except subprocess.CalledProcessError as e:
-            self.on_exception.emit(Exception(e.stderr.decode("utf-8", "ignore")))
-            return False, ""
+            return False, e.stderr.decode("utf-8", "ignore")
+
+    def _ffmpeg(self, args: list[str]):
+        ok, log = self._run_ffmpeg_command(args)
+        if not ok:
+            self.on_exception.emit(Exception(log))
+        return ok, log
 
     def _mark_in(self):
         if self.left_stack.currentIndex() == 1:
@@ -929,14 +1049,38 @@ class HomePage(QWidget):
         out = self._ask_output("_trim.mp4")
         if not out:
             return
-        args = [
-            "ffmpeg", "-y", "-ss", f"{self._in_ms/1000:.3f}", "-to", f"{self._out_ms/1000:.3f}",
-            "-i", self._current_path, "-c", "copy", out,
-        ]
-        ok, _ = self._ffmpeg(self._apply_export_opts(args, getattr(self, "_last_save_opts", {})))
-        if ok:
-            self.toast.emit({"level": "info", "title": "完成", "message": f"已輸出 {os.path.basename(out)}", "duration": 4000})
+        diag_id = generate_diagnostic_id()
+        log_structured(
+            self.logger,
+            logging.INFO,
+            diag_id,
+            "video.trim.request",
+            src=self._current_path,
+            dest=out,
+            in_ms=int(self._in_ms),
+            out_ms=int(self._out_ms),
+        )
+        result = self._video_service.trim(
+            self._current_path,
+            int(self._in_ms),
+            int(self._out_ms),
+            out,
+            self._last_export_options,
+            diagnostic_id=diag_id,
+        )
+        if result.success:
+            log_structured(self.logger, logging.INFO, diag_id, "video.trim.success", dest=out)
+            self.toast.emit({
+                "level": "info",
+                "title": "完成",
+                "message": f"已輸出 {os.path.basename(out)}（追蹤 {diag_id}）",
+                "duration": 4000,
+            })
             self.update_data.emit()
+        else:
+            err = attach_diagnostic(Exception(result.log), diag_id)
+            log_structured(self.logger, logging.ERROR, diag_id, "video.trim.error", error=result.log)
+            self.on_exception.emit(err)
 
     def _ffmpeg_mute(self):
         if not self._current_path:
@@ -944,11 +1088,34 @@ class HomePage(QWidget):
         out = self._ask_output("_mute.mp4")
         if not out:
             return
-        args = ["ffmpeg", "-y", "-i", self._current_path, "-c", "copy", "-an", out]
-        ok, _ = self._ffmpeg(self._apply_export_opts(args, getattr(self, "_last_save_opts", {})))
-        if ok:
-            self.toast.emit({"level": "info", "title": "完成", "message": f"已輸出 {os.path.basename(out)}", "duration": 4000})
+        diag_id = generate_diagnostic_id()
+        log_structured(
+            self.logger,
+            logging.INFO,
+            diag_id,
+            "video.mute.request",
+            src=self._current_path,
+            dest=out,
+        )
+        result = self._video_service.mute(
+            self._current_path,
+            out,
+            self._last_export_options,
+            diagnostic_id=diag_id,
+        )
+        if result.success:
+            log_structured(self.logger, logging.INFO, diag_id, "video.mute.success", dest=out)
+            self.toast.emit({
+                "level": "info",
+                "title": "完成",
+                "message": f"已輸出 {os.path.basename(out)}（追蹤 {diag_id}）",
+                "duration": 4000,
+            })
             self.update_data.emit()
+        else:
+            err = attach_diagnostic(Exception(result.log), diag_id)
+            log_structured(self.logger, logging.ERROR, diag_id, "video.mute.error", error=result.log)
+            self.on_exception.emit(err)
 
     def _on_preview_clicked(self):
         try:
@@ -970,42 +1137,3 @@ class HomePage(QWidget):
         except Exception as e:
             self.on_exception.emit(e)
 
-    def _apply_export_opts(self, args: list[str], opts: dict) -> list[str]:
-        try:
-            # 僅處理 animated webp 編碼參數
-            if "libwebp_anim" not in args:
-                return args
-            new = list(args)
-            # loop
-            try:
-                loop_flag = "0" if bool(opts.get('loop', True)) else "1"
-                if "-loop" in new:
-                    i = new.index("-loop")
-                    if i+1 < len(new):
-                        new[i+1] = loop_flag
-                else:
-                    new.extend(["-loop", loop_flag])
-            except Exception:
-                pass
-            # quality
-            try:
-                qv = str(int(opts.get('quality', 75)))
-                if "-q:v" in new:
-                    i = new.index("-q:v")
-                    if i+1 < len(new):
-                        new[i+1] = qv
-                else:
-                    new.extend(["-q:v", qv])
-            except Exception:
-                pass
-            # fps filter（若未指定）
-            try:
-                mf = int(opts.get('max_fps', 0))
-                has_fps = any(isinstance(x, str) and x.startswith('fps=') for x in new)
-                if mf > 0 and "-filter:v" not in new and not has_fps:
-                    new.extend(["-filter:v", f"fps={mf}"])
-            except Exception:
-                pass
-            return new
-        except Exception:
-            return args

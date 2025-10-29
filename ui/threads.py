@@ -22,13 +22,11 @@ DEFAULTS = {
     "feather_px": 2.5
 }
 import cv2
+import logging
 import os
 import sys
 import io
 import time
-import tempfile
-import shutil
-import subprocess
 from .ui_error import FFmpegNotFoundError
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Optional, Tuple
@@ -36,11 +34,13 @@ from logging import Logger
 
 import numpy as np
 from PIL import Image
+from core.diagnostics import attach_diagnostic, generate_diagnostic_id, log_structured
 
 from PyQt6.QtCore import (
     QObject, QThread, pyqtSignal, pyqtSlot, QSize, QEventLoop, QTimer
 )
 from PyQt6.QtGui import QImageReader
+from ui.services.rmbg_pipeline import (InputRouterService, ImagePipeline, VideoPipeline, EncoderService, ExportRuntimeOptions)
 def _estimate_bg_lab_from_borders(lab, border=10, k=2):
     h, w = lab.shape[:2]
     S = np.vstack([
@@ -304,7 +304,8 @@ class RmbgThread(QObject):
                   hsv_cfg: dict | None = None, wand: dict | None = None,
                   image_format: str | None = None, anim_format: str | None = None,
                   range_ms: tuple[int | None, int | None] | None = None,
-                  export_opts: dict | None = None): # rembg / openvino / hsv / wand
+                  export_opts: dict | None = None,
+                  diagnostic_id: Optional[str] = None): # rembg / openvino / hsv / wand
         # 防止對已刪除的 QThread 呼叫 isRunning()
         if self._thread is not None:
             try:
@@ -322,31 +323,47 @@ class RmbgThread(QObject):
                 self._thread = None
         self._worker = None
         self._thread = QThread()
+        effective_opts = export_opts or {}
+        diag = diagnostic_id or effective_opts.get("diagnostic_id")
         self._worker = _RmbgWorker(src_path, out_dir, prefer, engine, self.logger,
                                    hsv_cfg=hsv_cfg or {}, wand_cfg=wand or {},
                                    image_format=(image_format or 'webp'),
                                    anim_format=(anim_format or 'webp'),
                                    range_ms=range_ms,
-                                   export_opts=(export_opts or {}))
+                                   export_opts=effective_opts,
+                                   diagnostic_id=diag)
         self._worker.moveToThread(self._thread)
 
         # wiring
         self._thread.started.connect(self._worker.do_remove)
         self._worker.progress.connect(self.progress)
-        self._worker.finished.connect(self.finished)
-        self._worker.error.connect(self.error)
-        self._worker.error.connect(self.error_clear)
-        self._worker.finished.connect(self._thread.quit)
-        self._worker.finished.connect(self.finished)
+        self._worker.finished.connect(self._on_worker_finished)
+        self._worker.error.connect(self._on_worker_error)
 
         self._thread.finished.connect(self._worker.deleteLater)
-        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.finished.connect(self._cleanup_thread)
         self._thread.start()
-    
+
+    @pyqtSlot(dict)
+    def _on_worker_finished(self, payload: dict):
+        self.finished.emit(payload)
+        if self._thread is not None:
+            self._thread.quit()
+
     @pyqtSlot(object)
-    def error_clear(self, e):
-        self._thread.quit()
-        # self._thread = None
+    def _on_worker_error(self, exc):
+        self.error.emit(exc)
+        if self._thread is not None:
+            self._thread.quit()
+
+    def _cleanup_thread(self):
+        if self._thread is not None:
+            try:
+                self._thread.deleteLater()
+            except Exception:
+                pass
+        self._thread = None
+        self._worker = None
 
     def cancel_current(self):
         try:
@@ -363,13 +380,15 @@ class _RmbgWorker(QObject):
     def __init__(self, src_path: str, out_dir: str, prefer: str, engine: str, logger: Logger,
                  hsv_cfg: dict, wand_cfg: dict, image_format: str, anim_format: str,
                  range_ms: tuple[int | None, int | None] | None = None,
-                 export_opts: dict | None = None):
+                 export_opts: dict | None = None,
+                 diagnostic_id: Optional[str] = None):
         super().__init__()
         self.src_path = src_path
         self.out_dir = out_dir
         self.prefer = prefer
         self.engine = (engine or "rembg").lower()
         self.logger = logger
+        self.diagnostic_id = diagnostic_id or generate_diagnostic_id()
         # 延遲載入 OpenVINO 模型（需時）
         self._ov_compiled = None
         # HSV 可調參數（可依需求外部暴露）
@@ -385,8 +404,8 @@ class _RmbgWorker(QObject):
             self.hsv_opts.dilate_iter = int(hsv_cfg.get("dilate_iter", self.hsv_opts.dilate_iter))
             self.hsv_opts.feather_px = float(hsv_cfg.get("feather_px", self.hsv_opts.feather_px))
             self.hsv_opts.use_guided = bool(hsv_cfg.get("use_guided", self.hsv_opts.use_guided))
-        except Exception:
-            pass
+        except Exception as e:
+            self._log(logging.WARNING, f"worker.hsv_config.invalid: {e}")
         # 魔術棒參數
         self.wand_opts = wand_cfg or {}
         self.wand_seed = None
@@ -404,12 +423,34 @@ class _RmbgWorker(QObject):
             self.export_quality = int(eo.get("quality", 75))
             self.export_max_fps = int(eo.get("max_fps", 0))
             self.export_loop = bool(eo.get("loop", True))
+            self.export_target_path = eo.get("target_path")
+            self.export_direct_copy = bool(eo.get("direct_copy", False))
+            self.export_profile = str(eo.get("profile", image_format)).lower()
         except Exception:
             self.export_quality, self.export_max_fps, self.export_loop = 75, 0, True
+            self.export_target_path = None
+            self.export_direct_copy = False
+            self.export_profile = (image_format or "webp").lower()
+        if isinstance(self.export_target_path, str):
+            ext = os.path.splitext(self.export_target_path)[1].lower()
+            if ext:
+                self.export_profile = ext.lstrip(".") or self.export_profile
         # strength=1.5、erode_iter=1、feather_px=2.0
+        self.encoder_service = EncoderService(self.logger)
+        self.input_router = InputRouterService(
+            remove_rembg=self._remove_image_rembg,
+            remove_openvino=self._remove_image_openvino,
+            remove_hsv=self._remove_image_hsv,
+            remove_wand=self._remove_image_magicwand,
+            passthrough=self._load_rgba_direct,
+        )
+        self.image_pipeline = ImagePipeline(self.input_router, self.encoder_service, self.logger)
+        self.video_pipeline = VideoPipeline(self.input_router, self.encoder_service, self.logger)
+
         self.hsv_opts.strength = 1.5
         self._cancel_requested = False  # OpenSpec: add-processing-queue — cancel current job
         # spec: openspec/changes/add-processing-queue/tasks.md:1
+        self._log(logging.INFO, "worker.initialised", src=self.src_path, engine=self.engine, prefer=self.prefer)
 
     def request_cancel(self):
         self._cancel_requested = True
@@ -417,103 +458,122 @@ class _RmbgWorker(QObject):
     def _is_canceled(self) -> bool:
         return bool(self._cancel_requested)
 
+    def _log(self, level: int, event: str, **fields: object) -> None:
+        log_structured(self.logger, level, self.diagnostic_id, event, **fields)
+
     @pyqtSlot()
-    # main logic
     def do_remove(self):
         try:
             if self._is_canceled():
+                self._log(logging.WARNING, "worker.aborted", reason="canceled")
                 raise RuntimeError("canceled")
             if not os.path.isfile(self.src_path):
+                self._log(logging.ERROR, "worker.source.missing", src=self.src_path)
                 raise FileNotFoundError(self.src_path)
             os.makedirs(self.out_dir, exist_ok=True)
 
+            export_options = ExportRuntimeOptions(
+                image_format=self.image_format,
+                anim_format=self.anim_format,
+                quality=self.export_quality,
+                max_fps=self.export_max_fps,
+                loop=self.export_loop,
+                target_path=self.export_target_path,
+                direct_copy=self.export_direct_copy,
+                profile=self.export_profile,
+                diagnostic_id=self.diagnostic_id,
+            )
+
+            def progress_cb(value: int, status: str) -> None:
+                self._log(logging.DEBUG, "worker.progress", value=int(value), status=status)
+                self.progress.emit({
+                    "signalId": "rmbg",
+                    "value": int(value),
+                    "status": status,
+                    "diagnostic_id": self.diagnostic_id,
+                })
+
             ext = os.path.splitext(self.src_path)[1].lower()
+            wand_opts = dict(self.wand_opts) if isinstance(self.wand_opts, dict) else {}
+            wand_seed = self.wand_seed
+            self._log(
+                logging.INFO,
+                "worker.run.start",
+                ext=ext,
+                range=self.range_ms,
+                direct_copy=self.export_direct_copy,
+                profile=self.export_profile,
+            )
+
             if ext in RmbgThread.IMAGE_EXTS and ext not in RmbgThread.ANIM_EXTS:
-                out = self._remove_image(self.src_path, self.out_dir)
-                self.finished.emit({"input": self.src_path, "output": out, "kind": "image"})
+                progress_cb(5, f"processing ({self.engine})")
+                out = self.image_pipeline.run(
+                    self.src_path,
+                    self.out_dir,
+                    self.engine,
+                    export_options,
+                    wand_seed=wand_seed,
+                    wand_opts=wand_opts,
+                    progress_cb=progress_cb,
+                )
+                self._log(logging.INFO, "worker.image.completed", output=out)
+                self.finished.emit({
+                    "input": self.src_path,
+                    "output": out,
+                    "kind": "image",
+                    "diagnostic_id": self.diagnostic_id,
+                })
                 return
 
             if ext in RmbgThread.ANIM_EXTS or ext in RmbgThread.VIDEO_EXTS:
-                payload = self._remove_anim_or_video(self.src_path, self.out_dir, self.prefer)
+                progress_cb(5, "extract frames")
+                payload = self.video_pipeline.run(
+                    self.src_path,
+                    self.out_dir,
+                    self.engine,
+                    export_options,
+                    wand_seed=wand_seed,
+                    wand_opts=wand_opts,
+                    range_ms=self.range_ms,
+                    progress_cb=progress_cb,
+                )
+                self.fps = payload.get("fps", 0)
+                payload["diagnostic_id"] = self.diagnostic_id
+                self._log(logging.INFO, "worker.video.completed", output=payload.get("output"), frames=payload.get("frames"), fps=self.fps)
                 self.finished.emit(payload)
                 return
 
-            # 其他格式一律當作圖片處理
-            out = self._remove_image(self.src_path, self.out_dir)
-            self.finished.emit({"input": self.src_path, "output": out, "kind": "image"})
+            progress_cb(5, f"processing ({self.engine})")
+            out = self.image_pipeline.run(
+                self.src_path,
+                self.out_dir,
+                self.engine,
+                export_options,
+                wand_seed=wand_seed,
+                wand_opts=wand_opts,
+                progress_cb=progress_cb,
+            )
+            self._log(logging.INFO, "worker.image.completed", output=out)
+            self.finished.emit({
+                "input": self.src_path,
+                "output": out,
+                "kind": "image",
+                "diagnostic_id": self.diagnostic_id,
+            })
         except Exception as e:
-            self.error.emit(e)
+            exc = attach_diagnostic(e, self.diagnostic_id)
+            self._log(logging.ERROR, "worker.error", error=repr(exc))
+            self.error.emit(exc)
         finally:
             self._rembg_finished = True
 
     def rembg_is_finished(self) -> bool:
         return self._rembg_finished
 
-    # ---- helpers ----
-    def _check_ffmpeg(self) -> bool:
-        try:
-            subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            return True
-        except Exception:
-            return False
+    def _load_rgba_direct(self, src: str) -> np.ndarray:
+        return np.array(Image.open(src).convert("RGBA"))
 
-    # 靜態圖輸出
-    def _remove_image(self, src: str, out_dir: str) -> str:
-        if self._is_canceled():
-            raise RuntimeError("canceled")
-        base = os.path.splitext(os.path.basename(src))[0]
-        tmp_png = os.path.join(out_dir, f"{base}_rmbg_tmp.png")
-        out_png = os.path.join(out_dir, f"{base}_rmbg.png")
-        out_webp = os.path.join(out_dir, f"{base}_rmbg.webp")
-        self.progress.emit({"signalId": "rmbg", "value": 5, "status": f"loading model ({self.engine})"})
-
-        if self._is_canceled():
-            raise RuntimeError("canceled")
-        if self.engine == "openvino":
-            rgba = self._remove_image_openvino(src)
-        elif self.engine == "hsv":
-            rgba = self._remove_image_hsv(src)
-        elif self.engine == "wand":
-            if not self.wand_seed:
-                raise RuntimeError("魔術棒需要先在圖片上取樣（點擊）座標。")
-            rgba = self._remove_image_magicwand(src, self.wand_seed, self.wand_opts)
-        else:
-            rgba = self._remove_image_rembg(src)
-
-        Image.fromarray(rgba, "RGBA").save(tmp_png)
-
-        fmt = (self.image_format or 'webp').lower()
-        if fmt == 'png':
-            # 直接輸出 PNG（無損）
-            try:
-                os.replace(tmp_png, out_png)
-            except Exception:
-                shutil.copyfile(tmp_png, out_png)
-                os.remove(tmp_png)
-            self.progress.emit({"signalId":"rmbg","value":100,"status":"done(png)"})
-            return out_png
-        else:
-            # WEBP（使用 ffmpeg 確保一致性）
-            try:
-                subprocess.run([
-                    "ffmpeg","-y","-i", tmp_png,
-                    "-c:v","libwebp","-lossless","1",
-                    "-compression_level","6",
-                    "-preset","picture",
-                    out_webp
-                ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-                os.remove(tmp_png)
-                self.progress.emit({"signalId":"rmbg","value":100,"status":"done(webp)"})
-                return out_webp
-            except Exception:
-                self.progress.emit({"signalId":"rmbg","value":100,"status":"done(png fallback)"})
-                return tmp_png
-
-        # Image.fromarray(rgba, mode="RGBA").save(out)
-        # self.progress.emit({"signalId": "rmbg", "value": 100, "status": "done"})
-        # return out
-
-    # ========== 三種引擎 ==========
+# ========== 三種引擎 ==========
     def _remove_image_rembg(self, src: str) -> np.ndarray:
         try:
             from rembg import remove, new_session  # type: ignore
@@ -662,131 +722,4 @@ class _RmbgWorker(QObject):
         rgba = np.dstack([rgb, mask])
         return rgba
 
-    # ========== 動圖/影片處理 ==========
-    def _remove_anim_or_video(self, src: str, out_dir: str, prefer: str) -> dict:
-        if not self._check_ffmpeg():
-            raise FFmpegNotFoundError("需要 ffmpeg 以處理動圖/影片。請安裝並加入 PATH。")
-
-        base = os.path.splitext(os.path.basename(src))[0]
-        tmp = tempfile.mkdtemp(prefix="rmbg_")
-        frames_dir = os.path.join(tmp, "frames")
-        os.makedirs(frames_dir, exist_ok=True)
-
-        # 抽幀
-        self.progress.emit({"signalId": "rmbg", "value": 5, "status": "extract frames"})
-        # in/out（毫秒）
-        t_in, t_out = self.range_ms
-        extract_args = ["ffmpeg", "-y"]
-        if isinstance(t_in, int) and t_in > 0:
-            extract_args += ["-ss", f"{t_in/1000:.3f}"]
-        extract_args += ["-i", src, "-vsync", "0"]
-        if isinstance(t_out, int) and t_out > 0:
-            # 使用 -to 終點時間（以輸入時間軸為準）
-            extract_args += ["-to", f"{t_out/1000:.3f}"]
-        extract_args += [os.path.join(frames_dir, "f_%06d.png")]
-        try:
-            subprocess.run(extract_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-        except Exception:
-            shutil.rmtree(tmp, ignore_errors=True)
-            raise
-
-        files = sorted([f for f in os.listdir(frames_dir) if f.lower().endswith(".png")])
-        total = max(1, len(files))
-
-        # 逐幀去背
-        out_frames = os.path.join(tmp, "out")
-        os.makedirs(out_frames, exist_ok=True)
-        try:
-            for i, fname in enumerate(files, 1):
-                if self._is_canceled():
-                    raise RuntimeError("canceled")
-                fpath = os.path.join(frames_dir, fname)
-                if self.engine == "openvino":
-                    rgba = self._remove_image_openvino(fpath)
-                elif self.engine == "hsv":
-                    rgba = self._remove_image_hsv(fpath)
-                elif self.engine == "wand":
-                    if not self.wand_seed:
-                        raise RuntimeError("魔術棒需要先在圖片上取樣（點擊）座標。")
-                    rgba = self._remove_image_magicwand(fpath, self.wand_seed, self.wand_opts)
-                else:
-                    rgba = self._remove_image_rembg(fpath)
-                Image.fromarray(rgba, "RGBA").save(os.path.join(out_frames, fname))
-                if i % 3 == 0 or i == total:
-                    pct = 5 + int(80 * i / total)
-                    self.progress.emit({"signalId": "rmbg", "value": pct, "status": f"frame {i}/{total}"})
-        except Exception:
-            shutil.rmtree(tmp, ignore_errors=True)
-            raise
-
-        # 合成輸出：依設定 anim_format 選擇 webp 或 gif
-        prefer = (prefer or "auto").lower()
-        out_path: Optional[str] = None
-
-        # 取得 fps（失敗則 15）
-        def _probe_fps(p):
-            try:
-                r = subprocess.run(
-                    ["ffprobe","-v","error","-select_streams","v:0",
-                    "-show_entries","stream=avg_frame_rate",
-                    "-of","default=nw=1:nk=1", p],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True)
-                num,den = r.stdout.strip().split("/")
-                num,den = int(num), (int(den) if den!="0" else 1)
-                return max(1, round(num/den))
-            except Exception:
-                return 15
-            
-        fps = _probe_fps(src)
-        try:
-            if hasattr(self, 'export_max_fps'):
-                if self.export_max_fps is not None and int(self.export_max_fps) > 0:
-                    fps = [int(self.export_max_fps), int(fps)][1] if int(fps) < int(self.export_max_fps) else int(self.export_max_fps)
-                    fps = max(1, fps)
-                    print(f"限制輸出 fps={fps}")
-        except Exception:
-            pass
-        self.fps = fps
-        self.progress.emit({"signalId": "rmbg", "value": 90, "status": "encode"})
-        # 規格：固定輸出 animated-webp
-        out_webp = os.path.join(out_dir, f"{base}_rmbg.webp")
-        try:
-            loop_flag = "0"
-            try:
-                if hasattr(self, 'export_loop') and not bool(self.export_loop):
-                    loop_flag = "1"
-            except Exception:
-                loop_flag = "0"
-            qv = "75"
-            try:
-                if hasattr(self, 'export_quality'):
-                    qv = str(int(self.export_quality))
-            except Exception:
-                qv = "75"
-            args = [
-            "ffmpeg","-y","-framerate", str(self.fps),
-            "-i", os.path.join(out_frames,"f_%06d.png"),
-            "-c:v","libwebp_anim",
-            "-pix_fmt","yuva420p",
-            "-loop", loop_flag,
-            "-q:v", qv,
-            out_webp
-            ]
-            subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            out_path = out_webp
-        except Exception:
-            shutil.rmtree(tmp, ignore_errors=True)
-            raise
-
-        # if not out_path:
-        #     # 退而求其次：輸出去背後的逐幀資料夾
-        #     out_path = os.path.join(out_dir, f"{base}_rmbg_frames")
-        #     if os.path.exists(out_path):
-        #         shutil.rmtree(out_path)
-        #     shutil.copytree(out_frames, out_path)
-
-        # 清理暫存
-        shutil.rmtree(tmp, ignore_errors=True)
-        self.progress.emit({"signalId": "rmbg", "value": 100, "status": "done"})
-        return {"input": src, "output": out_path, "kind": "anim", "frames": len(files)}
     

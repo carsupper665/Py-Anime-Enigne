@@ -1,7 +1,12 @@
 from __future__ import annotations
-import numpy as np
-import cv2
 from typing import Dict, Any
+
+import numpy as np
+
+try:
+    import cv2
+except ModuleNotFoundError:  # pragma: no cover
+    cv2 = None
 
 
 def compute_alpha(bgr: np.ndarray, opts: Dict[str, Any]) -> np.ndarray:
@@ -13,6 +18,8 @@ def compute_alpha(bgr: np.ndarray, opts: Dict[str, Any]) -> np.ndarray:
     """
     if bgr is None or bgr.size == 0:
         raise ValueError("empty image")
+    if cv2 is None:
+        raise RuntimeError("OpenCV (cv2) is required to compute alpha masks.")
 
     o = {
         "tol_h": 10, "tol_s": 60, "tol_v": 60,

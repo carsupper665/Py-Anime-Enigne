@@ -15,6 +15,7 @@ class QueueJob:
     src: str
     prefer: str
     opts: Dict[str, Any]
+    diagnostic_id: Optional[str] = None
 
 
 class ProcessingQueue(QObject):
