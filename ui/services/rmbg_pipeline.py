@@ -342,7 +342,7 @@ class VideoPipeline:
     def __init__(self, router: InputRouterService, encoder: EncoderService, logger) -> None:
         self.router = router
         self.encoder = encoder
-        self.logger = self.logger = loggerFactory(logger_name=self.__class__.__name__, log_level=logger.level).getLogger()
+        self.logger = loggerFactory(logger_name=self.__class__.__name__, log_level=logger.level).getLogger()
 
     def _log(self, level: int, event: str, options: ExportRuntimeOptions, **fields: object) -> None:
         log_structured(self.logger, level, options.diagnostic_id, event, **fields)
