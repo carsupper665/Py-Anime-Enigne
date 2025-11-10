@@ -2,8 +2,15 @@ from __future__ import annotations
 import os
 from typing import Dict, Any
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QFormLayout, QComboBox, QHBoxLayout,
-    QLineEdit, QPushButton, QFileDialog
+    QWidget,
+    QVBoxLayout,
+    QLabel,
+    QFormLayout,
+    QComboBox,
+    QHBoxLayout,
+    QLineEdit,
+    QPushButton,
+    QFileDialog,
 )
 from PyQt6.QtCore import pyqtSignal, Qt
 
@@ -70,14 +77,22 @@ class SettingsPage(QWidget):
 
         # HSV 詳細設定
         hsv_form = QFormLayout()
-        self.h_tol_h = QLineEdit(self); self.h_tol_h.setPlaceholderText("10")
-        self.h_tol_s = QLineEdit(self); self.h_tol_s.setPlaceholderText("60")
-        self.h_tol_v = QLineEdit(self); self.h_tol_v.setPlaceholderText("60")
-        self.h_strength = QLineEdit(self); self.h_strength.setPlaceholderText("1.5")
-        self.h_erode = QLineEdit(self); self.h_erode.setPlaceholderText("1")
-        self.h_dilate = QLineEdit(self); self.h_dilate.setPlaceholderText("0")
-        self.h_feather = QLineEdit(self); self.h_feather.setPlaceholderText("2.0")
-        self.h_guided = QComboBox(self); self.h_guided.addItems(["false", "true"])
+        self.h_tol_h = QLineEdit(self)
+        self.h_tol_h.setPlaceholderText("10")
+        self.h_tol_s = QLineEdit(self)
+        self.h_tol_s.setPlaceholderText("60")
+        self.h_tol_v = QLineEdit(self)
+        self.h_tol_v.setPlaceholderText("60")
+        self.h_strength = QLineEdit(self)
+        self.h_strength.setPlaceholderText("1.5")
+        self.h_erode = QLineEdit(self)
+        self.h_erode.setPlaceholderText("1")
+        self.h_dilate = QLineEdit(self)
+        self.h_dilate.setPlaceholderText("0")
+        self.h_feather = QLineEdit(self)
+        self.h_feather.setPlaceholderText("2.0")
+        self.h_guided = QComboBox(self)
+        self.h_guided.addItems(["false", "true"])
 
         hsv_form.addRow("HSV 容差 H", self.h_tol_h)
         hsv_form.addRow("HSV 容差 S", self.h_tol_s)
@@ -97,7 +112,9 @@ class SettingsPage(QWidget):
         self.btn_apply.clicked.connect(self._apply)
         self.btn_reset.clicked.connect(self._reset)
         for b in (self.btn_apply, self.btn_reset):
-            b.setStyleSheet("QPushButton{background:#333;color:#EEE;border:none;border-radius:6px;padding:6px 12px;} QPushButton:hover{background:#444}")
+            b.setStyleSheet(
+                "QPushButton{background:#333;color:#EEE;border:none;border-radius:6px;padding:6px 12px;} QPushButton:hover{background:#444}"
+            )
         btns.addStretch(1)
         btns.addWidget(self.btn_reset)
         btns.addWidget(self.btn_apply)
@@ -118,7 +135,9 @@ class SettingsPage(QWidget):
         self.h_erode.setText(str(hsv.get("erode_iter", 1)))
         self.h_dilate.setText(str(hsv.get("dilate_iter", 0)))
         self.h_feather.setText(str(hsv.get("feather_px", 2.0)))
-        self.h_guided.setCurrentText("true" if hsv.get("use_guided", False) else "false")
+        self.h_guided.setCurrentText(
+            "true" if hsv.get("use_guided", False) else "false"
+        )
 
     def _apply(self):
         self._cfg.setdefault("output", {})
@@ -130,9 +149,13 @@ class SettingsPage(QWidget):
         # HSV 設定
         self._cfg.setdefault("hsv", {})
         h = self._cfg["hsv"]
+
         def _num(x, ty, default):
-            try: return ty(x)
-            except Exception: return default
+            try:
+                return ty(x)
+            except Exception:
+                return default
+
         h["tol_h"] = _num(self.h_tol_h.text(), int, 10)
         h["tol_s"] = _num(self.h_tol_s.text(), int, 60)
         h["tol_v"] = _num(self.h_tol_v.text(), int, 60)
@@ -140,7 +163,7 @@ class SettingsPage(QWidget):
         h["erode_iter"] = _num(self.h_erode.text(), int, 1)
         h["dilate_iter"] = _num(self.h_dilate.text(), int, 0)
         h["feather_px"] = _num(self.h_feather.text(), float, 2.0)
-        h["use_guided"] = (self.h_guided.currentText() == "true")
+        h["use_guided"] = self.h_guided.currentText() == "true"
         save_config(self._cfg)
         self.configSaved.emit(dict(self._cfg))
 
@@ -149,11 +172,15 @@ class SettingsPage(QWidget):
         self._load_to_ui(self._cfg)
 
     def _pick_dir(self):
-        d = QFileDialog.getExistingDirectory(self, "選擇輸出資料夾", self.out_dir.text() or os.getcwd())
+        d = QFileDialog.getExistingDirectory(
+            self, "選擇輸出資料夾", self.out_dir.text() or os.getcwd()
+        )
         if d:
             self.out_dir.setText(d)
 
     def _pick_model(self):
-        p, _ = QFileDialog.getOpenFileName(self, "選擇 OpenVINO 模型", os.getcwd(), "Model (*.onnx *.xml)")
+        p, _ = QFileDialog.getOpenFileName(
+            self, "選擇 OpenVINO 模型", os.getcwd(), "Model (*.onnx *.xml)"
+        )
         if p:
             self.ov_path.setText(p)

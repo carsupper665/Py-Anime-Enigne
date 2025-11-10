@@ -1,12 +1,17 @@
+# ./ui/wand_dialog.py
 from __future__ import annotations
-import os
 from typing import Optional, Tuple
 
 from PyQt6.QtCore import Qt, QEvent, QSize
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QLabel, QHBoxLayout, QSlider, QPushButton
+    QDialog,
+    QVBoxLayout,
+    QLabel,
+    QHBoxLayout,
+    QSlider,
+    QPushButton,
 )
-from PyQt6.QtGui import QPixmap, QImage, QPainter, QColor
+from PyQt6.QtGui import QPixmap, QImage, QPainter
 
 import cv2
 import numpy as np
@@ -50,21 +55,26 @@ class WandDialog(QDialog):
         self.view = QLabel()
         self.view.setMinimumSize(480, 270)
         self.view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.view.setStyleSheet("QLabel { background:#111; border:1px solid #333; border-radius:8px; }")
+        self.view.setStyleSheet(
+            "QLabel { background:#111; border:1px solid #333; border-radius:8px; }"
+        )
         v.addWidget(self.view, 1)
 
         # 控制列
         row = QHBoxLayout()
         self.lab_tol = QLabel(f"容差(H): {self.tol_h}")
         self.sl_tol = QSlider(Qt.Orientation.Horizontal)
-        self.sl_tol.setMinimum(1); self.sl_tol.setMaximum(60); self.sl_tol.setValue(self.tol_h)
+        self.sl_tol.setMinimum(1)
+        self.sl_tol.setMaximum(60)
+        self.sl_tol.setValue(self.tol_h)
         self.sl_tol.valueChanged.connect(self._on_tol_changed)
         row.addWidget(self.lab_tol)
         row.addWidget(self.sl_tol)
         v.addLayout(row)
 
         # 操作按鈕
-        btns = QHBoxLayout(); btns.addStretch(1)
+        btns = QHBoxLayout()
+        btns.addStretch(1)
         self.btn_cancel = QPushButton("取消")
         self.btn_ok = QPushButton("確定")
         self.btn_cancel.clicked.connect(self.reject)
@@ -102,11 +112,19 @@ class WandDialog(QDialog):
 
     def _set_display_pix(self, pix: QPixmap, overlay: QImage | None = None):
         # 將 pix 按 view 大小等比縮放；若有 overlay，疊加
-        scaled = pix.scaled(self.view.size() - QSize(16, 16), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        scaled = pix.scaled(
+            self.view.size() - QSize(16, 16),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
         if overlay is not None:
             # overlay 需與 scaled 同尺寸
             ov = QImage(overlay)
-            ov = ov.scaled(scaled.size(), Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            ov = ov.scaled(
+                scaled.size(),
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
             out = QPixmap(scaled.size())
             out.fill(Qt.GlobalColor.transparent)
             p = QPainter(out)
@@ -123,7 +141,11 @@ class WandDialog(QDialog):
             self._set_display_pix(self._base_pix)
 
     def eventFilter(self, obj, ev):
-        if obj is self.view and ev.type() == QEvent.Type.MouseButtonPress and self._rgb is not None:
+        if (
+            obj is self.view
+            and ev.type() == QEvent.Type.MouseButtonPress
+            and self._rgb is not None
+        ):
             pos = ev.position().toPoint()
             mapped = self._map_to_source(pos)
             if mapped is not None:
@@ -162,9 +184,21 @@ class WandDialog(QDialog):
         if self._rgb is None or self.seed is None:
             return
         from core.wand import compute_mask
+
         bgr = self._bgr
         h, w = bgr.shape[:2]
-        mask = compute_mask(bgr, self.seed, {"tolH": int(self.tol_h), "tolS": 60, "tolV": 60, "contiguous": True, "use_edge_barrier": True, "connectivity": 8})
+        mask = compute_mask(
+            bgr,
+            self.seed,
+            {
+                "tolH": int(self.tol_h),
+                "tolS": 60,
+                "tolV": 60,
+                "contiguous": True,
+                "use_edge_barrier": True,
+                "connectivity": 8,
+            },
+        )
 
         # downscale mask to display size
         disp = self.view.pixmap()
@@ -174,9 +208,6 @@ class WandDialog(QDialog):
         if disp is None:
             return
 
-        # 產生綠色半透明 overlay
-        kx = disp.width() / w
-        ky = disp.height() / h
         # 直接轉成 QImage 讓 _set_display_pix 做縮放匹配
         ov = np.zeros((h, w, 4), dtype=np.uint8)
         ov[..., 1] = 255  # G

@@ -1,4 +1,4 @@
-Py Anime Engine — 圖片/動圖/影片去背
+﻿Py Anime Engine — 圖片/動圖/影片去背
 
 簡介
 - 本專案提供桌面版去背工具，支援圖片、動圖與影片的前景擷取與輸出。
@@ -50,6 +50,12 @@ Py Anime Engine — 圖片/動圖/影片去背
   - 「加入佇列」：加入當前設定的去背任務
   - 「暫停/繼續/取消當前」：控制佇列與目前任務
 
+診斷與除錯
+- 匯出或佇列工作會指派 `diag-xxxxxxxx` 追蹤代碼，Toast、錯誤對話框與佇列提示皆會顯示該代碼，方便回報。
+- 日誌改為輸出 JSON 結構（`event`、`diagnostic_id`、命令旗標、暫存路徑等），可在終端以 `diag-` 搜尋對應紀錄。
+- `TempDirectoryManager` 會以 UUID 命名暫存檔並於成功或失敗後清理，避免舊檔殘留。
+- `ExportCommandBuilder` 會依輸出 profile（預設 WebP）調整 ffmpeg 旗標；可透過結構化日誌確認實際指令。
+
 常見問題
 - FFmpeg Not Found：請安裝 ffmpeg 並確保在 PATH
 - 無多媒體相依（WSL 等）：影片仍可「預覽影格」（ffmpeg 擷取）與去背；但播放器無法預覽播放
@@ -66,3 +72,7 @@ OpenSpec 與規格連結
 
 字型
 - 思源黑體（Source Han Sans）：https://github.com/adobe-fonts/source-han-sans
+
+
+
+

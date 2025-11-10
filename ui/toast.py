@@ -1,9 +1,22 @@
-
 # ui/toast.py
-from PyQt6.QtCore import Qt, QTimer, QElapsedTimer, QCoreApplication, pyqtSignal, QEventLoop, pyqtSlot
+from PyQt6.QtCore import (
+    Qt,
+    QTimer,
+    QElapsedTimer,
+    QCoreApplication,
+    pyqtSignal,
+    QEventLoop,
+    pyqtSlot,
+)
 from PyQt6.QtWidgets import (
-    QDialog, QWidget, QVBoxLayout, QLabel, QProgressBar, QPushButton,
-    QHBoxLayout, QPlainTextEdit
+    QDialog,
+    QWidget,
+    QVBoxLayout,
+    QLabel,
+    QProgressBar,
+    QPushButton,
+    QHBoxLayout,
+    QPlainTextEdit,
 )
 from PyQt6.QtGui import QMouseEvent
 import traceback as _tb
@@ -29,23 +42,31 @@ QPushButton#details {
 QPushButton#details:hover { color:#fff; }
 """
 
+
 class _DetailDialog(QDialog):
     def __init__(self, parent: QWidget | None, title: str, details: str):
         super().__init__(parent)
         self.setWindowTitle(f"{title} — Details")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
         self.resize(720, 420)
-        lay = QVBoxLayout(self); lay.setContentsMargins(10,10,10,10); lay.setSpacing(8)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(8)
         edit = QPlainTextEdit(self)
-        edit.setStyleSheet("font-family: 'Source Han Sans TC'; font-size: 14px; color: white")
+        edit.setStyleSheet(
+            "font-family: 'Source Han Sans TC'; font-size: 14px; color: white"
+        )
         edit.setReadOnly(True)
         edit.setPlainText(details)
         lay.addWidget(edit)
-        btns = QHBoxLayout(); btns.addStretch(1)
-        ok = QPushButton("Close"); ok.clicked.connect(self.accept)
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        ok = QPushButton("Close")
+        ok.clicked.connect(self.accept)
         ok.setStyleSheet("font-family: 'Inter'; color: white")
         btns.addWidget(ok)
         lay.addLayout(btns)
+
 
 class Toast(QDialog):
     """單一組件同時支援：
@@ -67,10 +88,13 @@ class Toast(QDialog):
 
         self.loading_mode = False
 
-        self.lt  = QLabel(objectName="title")
-        self.msg = QLabel(objectName="msg"); self.msg.setWordWrap(True)
+        self.lt = QLabel(objectName="title")
+        self.msg = QLabel(objectName="msg")
+        self.msg.setWordWrap(True)
 
-        row = QHBoxLayout(); row.setContentsMargins(0,0,0,0); row.setSpacing(8)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
         self.details_btn = QPushButton("Details", objectName="details")
         self.details_btn.clicked.connect(self._open_details)
         self.details_btn.hide()
@@ -80,15 +104,20 @@ class Toast(QDialog):
         row.addStretch(1)
         row.addWidget(self.ok)
 
-        self.bar = QProgressBar(); self.bar.setTextVisible(False); self.bar.setFixedHeight(6)
+        self.bar = QProgressBar()
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(6)
 
         v.addWidget(self.lt)
         v.addWidget(self.msg)
         v.addLayout(row)
         v.addWidget(self.bar)
 
-        self._hide_timer = QTimer(self); self._hide_timer.timeout.connect(self.hide)
-        self._tick = QTimer(self); self._tick.setInterval(16); self._tick.timeout.connect(self._update_bar)
+        self._hide_timer = QTimer(self)
+        self._hide_timer.timeout.connect(self.hide)
+        self._tick = QTimer(self)
+        self._tick.setInterval(16)
+        self._tick.timeout.connect(self._update_bar)
         self._elapsed = QElapsedTimer()
         self._ms = 0
         self._accent = "#ff00ea"
@@ -147,12 +176,14 @@ class Toast(QDialog):
         allow_multiple: bool = True,
     ):
         # self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.ToolTip)
-        self._is_fatal = (level.lower() == "fatal")
+        self._is_fatal = level.lower() == "fatal"
         if self.loading_mode and (not self._is_fatal):
             print("none fatal notice", level.lower())
             twin = Toast(self.parent())
             twin.fatalTriggered.connect(self.fatalTriggered)
-            twin.show_notice(level, title, message, ms, px, py, traceback, allow_multiple=False)
+            twin.show_notice(
+                level, title, message, ms, px, py, traceback, allow_multiple=False
+            )
             return  # loading 狀態不接受 notice
 
         if allow_multiple and self.isVisible():
@@ -160,9 +191,17 @@ class Toast(QDialog):
             twin.fatalTriggered.connect(self.fatalTriggered)
             if py:
                 py -= self.height()
-            return twin.show_notice(level, title, message, ms, px, py, traceback, allow_multiple=False)
+            return twin.show_notice(
+                level, title, message, ms, px, py, traceback, allow_multiple=False
+            )
 
-        colors = {"info": "#38c942", "warn": "#ffbd4a", "error": "#ff5c5c", "debug": "#11a4f3", "fatal": "#ff00ea"}
+        colors = {
+            "info": "#38c942",
+            "warn": "#ffbd4a",
+            "error": "#ff5c5c",
+            "debug": "#11a4f3",
+            "fatal": "#ff00ea",
+        }
         self._accent = colors.get(level.lower(), "#11a4f3")
         _accent = colors.get(level.lower(), "#11a4f3")
         self._apply_style(_accent)
@@ -180,13 +219,19 @@ class Toast(QDialog):
         else:
             self._detail_text = base
 
-        self.lt.setText(title); self.msg.setText(base)
-        self.adjustSize(); self.details_btn.setVisible(False)
+        self.lt.setText(title)
+        self.msg.setText(base)
+        self.adjustSize()
+        self.details_btn.setVisible(False)
 
-        
         if self._is_fatal:
             import random
-            t_head = random.choice(self.fatal_heads) + "\n\n" + time.strftime("%Y-%m-%d %H:%M:%S")
+
+            t_head = (
+                random.choice(self.fatal_heads)
+                + "\n\n"
+                + time.strftime("%Y-%m-%d %H:%M:%S")
+            )
             self._detail_text = f"{t_head}\n\n{self._detail_text}"
             self.details_btn.setVisible(True)
             self.ok.setText("Exit")
@@ -195,14 +240,18 @@ class Toast(QDialog):
             self.move(px + 20, py + (self.parent().height() - self.height() - 20))
 
         # notice 模式使用倒數條
-        self.bar.setRange(0, 1000); self.bar.setValue(1000)
+        self.bar.setRange(0, 1000)
+        self.bar.setValue(1000)
         self._ms = max(200, int(ms))
-        self._elapsed.restart(); self._tick.start()
+        self._elapsed.restart()
+        self._tick.start()
         self._hide_timer.start(self._ms)
         self.show()
 
     def _open_details(self):
-        dlg = _DetailDialog(self.window(), self.lt.text() or "Details", self._detail_text)
+        dlg = _DetailDialog(
+            self.window(), self.lt.text() or "Details", self._detail_text
+        )
         dlg.open()
 
     def _update_bar(self):
@@ -218,7 +267,8 @@ class Toast(QDialog):
 
     def _confirm(self):
         # loading=取消；notice=立即關閉
-        self._tick.stop(); self._hide_timer.stop()
+        self._tick.stop()
+        self._hide_timer.stop()
         self.hide()
         if self._is_fatal:
             self._do_fatal()
@@ -228,10 +278,14 @@ class Toast(QDialog):
         if e.button() == Qt.MouseButton.LeftButton:
             self._drag_active = True
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
-            self._drag_offset = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self._drag_offset = (
+                e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            )
 
     def mouseMoveEvent(self, e: QMouseEvent):
-        if getattr(self, "_drag_active", False) and (e.buttons() & Qt.MouseButton.LeftButton):
+        if getattr(self, "_drag_active", False) and (
+            e.buttons() & Qt.MouseButton.LeftButton
+        ):
             self.move(e.globalPosition().toPoint() - self._drag_offset)
 
     def mouseReleaseEvent(self, e: QMouseEvent):
@@ -245,10 +299,11 @@ class Toast(QDialog):
             pass
         finally:
             QCoreApplication.quit()
-            
+
 
 class LoadingToast(QDialog):
     finished = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
@@ -262,24 +317,28 @@ class LoadingToast(QDialog):
 
         self.loading_mode = False
 
-        self.lt  = QLabel(objectName="title")
-        self.msg = QLabel(objectName="msg"); self.msg.setWordWrap(True)
+        self.lt = QLabel(objectName="title")
+        self.msg = QLabel(objectName="msg")
+        self.msg.setWordWrap(True)
 
-        row = QHBoxLayout(); row.setContentsMargins(0,0,0,0); row.setSpacing(8)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
         self.cancel_btn = QPushButton("確定", objectName="ok")
         self.cancel_btn.clicked.connect(self._cancel)
         # row.addWidget(self.details_btn)
         row.addStretch(1)
         row.addWidget(self.cancel_btn)
 
-        self.bar = QProgressBar(); self.bar.setTextVisible(False); self.bar.setFixedHeight(6)
+        self.bar = QProgressBar()
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(6)
 
         v.addWidget(self.lt)
         v.addWidget(self.msg)
         v.addLayout(row)
         v.addWidget(self.bar)
 
-    
         self._accent = "#00a6ff"
         # self._is_fatal = False
         # self._detail_text = ""
@@ -302,16 +361,18 @@ class LoadingToast(QDialog):
     @pyqtSlot(dict)
     def update_progress(self, data: dict):
         if not self.loading_mode:
-            print(f"Cant update progress in notice mode, ID:{data.get('signalId', None)}")
+            print(
+                f"Cant update progress in notice mode, ID:{data.get('signalId', None)}"
+            )
             return
-        
+
         id = data.get("signalId")
         value = data.get("value")
         status_text = data.get("status")
 
         if (value is None) and (status_text is None) or (id is None):
             if id is None:
-            #    self.logger.warning("No signalId in progress data")
+                #    self.logger.warning("No signalId in progress data")
                 print("No signalId in progress data")
             return
         try:
@@ -321,13 +382,19 @@ class LoadingToast(QDialog):
                     self._cancel()
             if status_text is not None:
                 self.msg.setText(status_text)
-            
+
             # self.logger.debug(f"progress: {id}, status: {status_text}, value: {value} ")
         except Exception as e:
             # self.logger.error(f"UI update progress error: \n {e.with_traceback()}")
             raise e
 
-    def show_loading(self, title: str = "Loading...", message: str = "Please wait...", px: int | None = None, py: int | None = None):
+    def show_loading(
+        self,
+        title: str = "Loading...",
+        message: str = "Please wait...",
+        px: int | None = None,
+        py: int | None = None,
+    ):
         # 直接使用 QDialog 的 ApplicationModal，避免額外遮罩層攔截事件
         # self._recover = self.windowModality()
         self.loading_mode = True
@@ -335,25 +402,34 @@ class LoadingToast(QDialog):
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.setModal(True)
         # self._is_fatal = False
-        self._accent = "#11a4f3"; self._apply_style()
-        self.lt.setText(title); self.msg.setText(message)
+        self._accent = "#11a4f3"
+        self._apply_style()
+        self.lt.setText(title)
+        self.msg.setText(message)
         # self.details_btn.setVisible(False)
         self.cancel_btn.setText("Cancel")
-        self.bar.setRange(0, 100); self.bar.setValue(0)
+        self.bar.setRange(0, 100)
+        self.bar.setValue(0)
         self.adjustSize()
         if px is not None and py is not None and self.parent():
             self.move(px + 20, py + (self.parent().height() - self.height() - 20))
-        self.open(); self.raise_()
-    
+        self.open()
+        self.raise_()
+
         # 可拖曳移動
+
     def mousePressEvent(self, e: QMouseEvent):
         if e.button() == Qt.MouseButton.LeftButton:
             self._drag_active = True
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
-            self._drag_offset = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self._drag_offset = (
+                e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            )
 
     def mouseMoveEvent(self, e: QMouseEvent):
-        if getattr(self, "_drag_active", False) and (e.buttons() & Qt.MouseButton.LeftButton):
+        if getattr(self, "_drag_active", False) and (
+            e.buttons() & Qt.MouseButton.LeftButton
+        ):
             self.move(e.globalPosition().toPoint() - self._drag_offset)
 
     def mouseReleaseEvent(self, e: QMouseEvent):
@@ -365,18 +441,22 @@ class LoadingToast(QDialog):
     def on_exception_cancel(self):
         self._cancel()
 
+
 if __name__ == "__main__":
     import sys
     from PyQt6.QtWidgets import QApplication, QMainWindow
 
     app = QApplication(sys.argv)
-    mw = QMainWindow(); mw.resize(800, 600); mw.show()
+    mw = QMainWindow()
+    mw.resize(800, 600)
+    mw.show()
 
     toast = Toast(mw)
     toast.show_loading("Loading...", "Please wait...", mw.x(), mw.y())
 
     def finish():
         toast.set_progress(100, "done")
+
     QTimer.singleShot(3000, finish)
 
     sys.exit(app.exec())

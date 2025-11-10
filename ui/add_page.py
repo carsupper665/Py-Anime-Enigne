@@ -2,8 +2,15 @@
 # from __future__ import annotations
 import os
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout,
-    QFileDialog, QListWidget, QListWidgetItem, QMessageBox
+    QWidget,
+    QVBoxLayout,
+    QLabel,
+    QPushButton,
+    QHBoxLayout,
+    QFileDialog,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
 from ui.osd import OSD
@@ -28,6 +35,7 @@ BTN_STYLE = """
         }
 """
 
+
 class AddPage(QWidget):
     on_exception = pyqtSignal(object)
     on_activated = pyqtSignal(QWidget)
@@ -41,7 +49,7 @@ class AddPage(QWidget):
         self.osd: OSD | None = None
         self.data = {"dir": "./animes", "items": []}  # 內部狀態
 
-        self.activated_gifs:dict[str:QWidget] =  {}
+        self.activated_gifs: dict[str:QWidget] = {}
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -58,7 +66,9 @@ class AddPage(QWidget):
 
         # 清單：顯示提供的 data.items
         self.list = QListWidget(self)
-        self.list.itemDoubleClicked.connect(self._show_selected)  # 雙擊顯示 OSD（QListWidget 提供 itemDoubleClicked）。:contentReference[oaicite:1]{index=1}
+        self.list.itemDoubleClicked.connect(
+            self._show_selected
+        )  # 雙擊顯示 OSD（QListWidget 提供 itemDoubleClicked）。:contentReference[oaicite:1]{index=1}
         self.list.setStyleSheet("""
             QListWidget { background:#111; border:1px solid #333; border-radius:8px; color:#ddd; }
             QListWidget::item { padding:6px 10px; }
@@ -72,7 +82,7 @@ class AddPage(QWidget):
 
         # self.btn_pick = QPushButton("選擇其他檔案", self)
         # self.btn_pick.clicked.connect(self._pick_and_add)  # 仍可手動選擇（QFileDialog）。:contentReference[oaicite:2]{index=2}
-        
+
         self.btn_show.setStyleSheet(BTN_STYLE)
         # self.btn_pick.setStyleSheet(BTN_STYLE)
 
@@ -95,12 +105,17 @@ class AddPage(QWidget):
         payload: {"dir": str, "items": [{"path": str, "width": int, "height": int, "is_anim": bool, "bytes": int}, ...]}
         mode: "replace" | "merge"
         """
-        self.logger.debug(f"AddPage.update_data() called with mode={mode}, payload={payload if len(payload.get('items', []))<5 else '...'}")
+        self.logger.debug(
+            f"AddPage.update_data() called with mode={mode}, payload={payload if len(payload.get('items', [])) < 5 else '...'}"
+        )
         try:
             if not isinstance(payload, dict) or "items" not in payload:
                 return
             if mode == "replace":
-                self.data = {"dir": payload.get("dir", self.data["dir"]), "items": list(payload["items"])}
+                self.data = {
+                    "dir": payload.get("dir", self.data["dir"]),
+                    "items": list(payload["items"]),
+                }
                 self._rebuild_list()
             else:  # merge
                 seen = {it["path"] for it in self.data["items"]}
@@ -129,9 +144,9 @@ class AddPage(QWidget):
         for it in self.data["items"]:
             name = os.path.basename(it["path"])
             anim_tag = "🎞" if it.get("is_anim") else "🖼"
-            wh = f'{it.get("width","?")}×{it.get("height","?")}'
-            size_k = f'{(it.get("bytes",0)/1024):.1f} KB'
-            text = f'{anim_tag} {name}  ·  {wh}  ·  {size_k}'
+            wh = f"{it.get('width', '?')}×{it.get('height', '?')}"
+            size_k = f"{(it.get('bytes', 0) / 1024):.1f} KB"
+            text = f"{anim_tag} {name}  ·  {wh}  ·  {size_k}"
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, it)
             self.list.addItem(item)
@@ -147,23 +162,25 @@ class AddPage(QWidget):
             it = self._current_path()
             if not it:
                 return
-            path = it['path']
+            path = it["path"]
             self.logger.debug(f"Show selected path: {path}")
             self.logger.debug(f"Item info: {it}")
-            name=it['path'].split("./animes\\")[-1]
+            name = it["path"].split("./animes\\")[-1]
             if name in self.activated_gifs:
                 btn = QMessageBox.question(
-                            self, "目標已存在", f"「{name}」已存在，創建副本?",
-                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                            QMessageBox.StandardButton.No
-                        )
+                    self,
+                    "目標已存在",
+                    f"「{name}」已存在，創建副本?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
                 if btn != QMessageBox.StandardButton.Yes:
                     return
 
                 name = self._duplicate(name)
             osd = OSD(name=name)
             osd.on_exception.connect(self.on_exception)
-            osd.set_media(path, size=(it['width'], it['height']))
+            osd.set_media(path, size=(it["width"], it["height"]))
             osd.show()
             osd.activateWindow()
             osd.on_closed.connect(self.gif_closed)
@@ -181,12 +198,17 @@ class AddPage(QWidget):
 
     def _pick_and_add(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "選擇動畫", self.data.get("dir", ""), "Images (*.gif *.webp *.apng *.png *.jpg *.jpeg)"
+            self,
+            "選擇動畫",
+            self.data.get("dir", ""),
+            "Images (*.gif *.webp *.apng *.png *.jpg *.jpeg)",
         )
         if not path:
             return
         # 最少化：只新增 path，其餘欄位留空或由你後端填補
         if not any(it["path"] == path for it in self.data["items"]):
-            self.data["items"].append({"path": path, "width": 0, "height": 0, "is_anim": True, "bytes": 0})
+            self.data["items"].append(
+                {"path": path, "width": 0, "height": 0, "is_anim": True, "bytes": 0}
+            )
             self._rebuild_list()
             self.dataChanged.emit(self.data)

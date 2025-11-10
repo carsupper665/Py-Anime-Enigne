@@ -1,5 +1,6 @@
-import time
-import types
+import pytest
+
+pytest.importorskip("pytestqt")
 
 from ui.queue import ProcessingQueue, QueueJob
 
@@ -20,7 +21,9 @@ def test_queue_basic_order(qtbot):
     q.enqueue(QueueJob(src="b.png", prefer="hsv", opts={}))
 
     # 讓事件迴圈處理一下
-    qtbot.waitUntil(lambda: events == [("start", "a.png"), ("start", "b.png")], timeout=1000)
+    qtbot.waitUntil(
+        lambda: events == [("start", "a.png"), ("start", "b.png")], timeout=1000
+    )
 
     assert events == [("start", "a.png"), ("start", "b.png")]
 
@@ -44,4 +47,3 @@ def test_queue_pause_resume(qtbot):
 
     q.resume()
     qtbot.waitUntil(lambda: events == [("start", "x.png")], timeout=1000)
-
