@@ -12,7 +12,9 @@ def generate_diagnostic_id(prefix: str = "diag") -> str:
     return f"{prefix}-{token}"
 
 
-def _build_payload(diagnostic_id: str, event: str, extra: Dict[str, Any]) -> Dict[str, Any]:
+def _build_payload(
+    diagnostic_id: str, event: str, extra: Dict[str, Any]
+) -> Dict[str, Any]:
     payload: Dict[str, Any] = {"diagnostic_id": diagnostic_id, "event": event}
     for key, value in extra.items():
         if value is None:
@@ -35,7 +37,9 @@ def log_structured(
     logger.log(level, json.dumps(payload, ensure_ascii=False))
 
 
-def attach_diagnostic(exc: BaseException, diagnostic_id: Optional[str]) -> BaseException:
+def attach_diagnostic(
+    exc: BaseException, diagnostic_id: Optional[str]
+) -> BaseException:
     """Annotate an exception with a diagnostic id for downstream handlers."""
     if diagnostic_id:
         setattr(exc, "diagnostic_id", diagnostic_id)

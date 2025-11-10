@@ -2,7 +2,12 @@ import json
 import logging
 from pathlib import Path
 
-from core.diagnostics import attach_diagnostic, format_user_message, generate_diagnostic_id, log_structured
+from core.diagnostics import (
+    attach_diagnostic,
+    format_user_message,
+    generate_diagnostic_id,
+    log_structured,
+)
 from core.export_context import ExportOptions
 from core.export.services import ExportCommandBuilder, TempDirectoryManager
 
@@ -45,7 +50,9 @@ def test_export_command_builder_logs(caplog):
     diag = generate_diagnostic_id()
 
     with caplog.at_level(logging.INFO, logger="test.builder"):
-        cmd = builder.build_trim_command("input.mp4", 0, 1000, "output.mp4", diagnostic_id=diag)
+        cmd = builder.build_trim_command(
+            "input.mp4", 0, 1000, "output.mp4", diagnostic_id=diag
+        )
 
     assert cmd[0] == "ffmpeg"
     payload = json.loads(caplog.records[0].message)

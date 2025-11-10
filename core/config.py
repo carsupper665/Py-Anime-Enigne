@@ -34,8 +34,8 @@ def get_default_config() -> Dict[str, Any]:
             "model_path": "",
         },
         "output": {
-            "image": "webp",   # png | webp
-            "anim": "webp",    # webp | gif
+            "image": "webp",  # png | webp
+            "anim": "webp",  # webp | gif
             "dir": "./animes",
         },
         "export": {
@@ -50,9 +50,7 @@ def get_default_config() -> Dict[str, Any]:
             },
         },
         # 規格：影片輸出固定為 animated-webp（不含音訊/背景合成選項）
-        "video": {
-            "format": "animated-webp"
-        },
+        "video": {"format": "animated-webp"},
         # OSD 版面（關閉時保存、下次載入時還原）
         # 每筆：{name, path, x, y, w, h, visible}
         "osd": [],
@@ -71,7 +69,9 @@ def migrate_config(data: Dict[str, Any], default: Dict[str, Any]) -> Dict[str, A
 
     # Legacy output options -> export.options
     export_options = data.setdefault("export", {}).setdefault("options", {})
-    legacy_output = data.get("output", {}) if isinstance(data.get("output"), dict) else {}
+    legacy_output = (
+        data.get("output", {}) if isinstance(data.get("output"), dict) else {}
+    )
     for key in ("quality", "max_fps", "loop"):
         if key in legacy_output:
             export_options[key] = legacy_output[key]

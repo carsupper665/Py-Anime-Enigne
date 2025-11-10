@@ -1,8 +1,6 @@
+# ./ui/queue.py
+
 from __future__ import annotations
-"""
-OpenSpec: add-processing-queue
-spec: openspec/changes/add-processing-queue/specs/processing-queue/spec.md:3
-"""
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
 from .logger import loggerFactory
@@ -19,11 +17,11 @@ class QueueJob:
 
 
 class ProcessingQueue(QObject):
-    job_enqueued = pyqtSignal(object)      # QueueJob
-    job_started = pyqtSignal(object)       # QueueJob
+    job_enqueued = pyqtSignal(object)  # QueueJob
+    job_started = pyqtSignal(object)  # QueueJob
     job_progress = pyqtSignal(object, dict)  # (QueueJob, progress)
     job_finished = pyqtSignal(object, dict)  # (QueueJob, payload)
-    job_error = pyqtSignal(object, object)   # (QueueJob, exc)
+    job_error = pyqtSignal(object, object)  # (QueueJob, exc)
     queue_empty = pyqtSignal()
     state_changed = pyqtSignal(str)  # idle|running|paused
 
@@ -32,7 +30,9 @@ class ProcessingQueue(QObject):
         self._q: List[QueueJob] = []
         self._current: Optional[QueueJob] = None
         self._paused: bool = False
-        self.logger = loggerFactory(write_log=False, logger_name="ProcessingQueue", log_level="DEBUG").getLogger()
+        self.logger = loggerFactory(
+            write_log=False, logger_name="ProcessingQueue", log_level="DEBUG"
+        ).getLogger()
 
     # public API
     def enqueue(self, job: QueueJob):

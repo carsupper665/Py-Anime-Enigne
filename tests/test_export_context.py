@@ -22,7 +22,13 @@ def test_parse_time_range_invalid_value_raises():
 
 def test_merge_export_settings_applies_overrides():
     cfg = get_default_config()
-    overrides = {"quality": 90, "max_fps": 0, "loop": False, "profile": "png", "target_path": "/tmp/out.png"}
+    overrides = {
+        "quality": 90,
+        "max_fps": 0,
+        "loop": False,
+        "profile": "png",
+        "target_path": "/tmp/out.png",
+    }
     options = merge_export_settings(cfg, overrides)
     assert options == ExportOptions(
         quality=90,

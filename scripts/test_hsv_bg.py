@@ -4,12 +4,14 @@ import os
 import argparse
 import sys
 from pathlib import Path
+
 try:
     import cv2
 except ModuleNotFoundError:  # pragma: no cover
     cv2 = None
     if "PYTEST_CURRENT_TEST" in os.environ:
         import pytest
+
         pytest.skip("OpenCV (cv2) not installed", allow_module_level=True)
 import numpy as np
 
@@ -25,12 +27,12 @@ def synthetic_sample(w=640, h=360):
     bg = np.zeros((h, w, 3), np.uint8)
     # green-ish background gradient
     for y in range(h):
-        g = int(120 + 60 * (y / max(1, h-1)))
+        g = int(120 + 60 * (y / max(1, h - 1)))
         bg[y, :, :] = (40, g, 40)
     # red circle as foreground
-    cv2.circle(bg, (w//2, h//2), min(w,h)//6, (40,40,220), thickness=-1)
+    cv2.circle(bg, (w // 2, h // 2), min(w, h) // 6, (40, 40, 220), thickness=-1)
     # blue rectangle
-    cv2.rectangle(bg, (w//6, h//3), (w//3, h//2), (220,40,40), thickness=-1)
+    cv2.rectangle(bg, (w // 6, h // 3), (w // 3, h // 2), (220, 40, 40), thickness=-1)
     return bg
 
 
@@ -49,16 +51,20 @@ def main():
     if cv2 is None:
         raise SystemExit("OpenCV (cv2) 未安裝，無法執行此腳本。")
     ap = argparse.ArgumentParser(description="Test core.hsv_bg.compute_alpha")
-    ap.add_argument('--input', '-i', help='Input image path. If omitted, use synthetic sample.')
-    ap.add_argument('--outdir', '-o', default='./_tmp_hsv_test', help='Output directory')
-    ap.add_argument('--tol_h', type=int, default=10)
-    ap.add_argument('--tol_s', type=int, default=60)
-    ap.add_argument('--tol_v', type=int, default=60)
-    ap.add_argument('--strength', type=float, default=1.5)
-    ap.add_argument('--erode', type=int, default=1)
-    ap.add_argument('--dilate', type=int, default=0)
-    ap.add_argument('--feather', type=float, default=2.0)
-    ap.add_argument('--guided', action='store_true')
+    ap.add_argument(
+        "--input", "-i", help="Input image path. If omitted, use synthetic sample."
+    )
+    ap.add_argument(
+        "--outdir", "-o", default="./_tmp_hsv_test", help="Output directory"
+    )
+    ap.add_argument("--tol_h", type=int, default=10)
+    ap.add_argument("--tol_s", type=int, default=60)
+    ap.add_argument("--tol_v", type=int, default=60)
+    ap.add_argument("--strength", type=float, default=1.5)
+    ap.add_argument("--erode", type=int, default=1)
+    ap.add_argument("--dilate", type=int, default=0)
+    ap.add_argument("--feather", type=float, default=2.0)
+    ap.add_argument("--guided", action="store_true")
     args = ap.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -70,17 +76,17 @@ def main():
         name = os.path.splitext(os.path.basename(args.input))[0]
     else:
         bgr = synthetic_sample()
-        name = 'synthetic'
+        name = "synthetic"
 
     opts = {
-        'tol_h': args.tol_h,
-        'tol_s': args.tol_s,
-        'tol_v': args.tol_v,
-        'strength': args.strength,
-        'erode_iter': args.erode,
-        'dilate_iter': args.dilate,
-        'feather_px': args.feather,
-        'use_guided': args.guided,
+        "tol_h": args.tol_h,
+        "tol_s": args.tol_s,
+        "tol_v": args.tol_v,
+        "strength": args.strength,
+        "erode_iter": args.erode,
+        "dilate_iter": args.dilate,
+        "feather_px": args.feather,
+        "use_guided": args.guided,
     }
     alpha = compute_alpha(bgr, opts)
     fg_ratio = float((alpha > 0).sum()) / float(alpha.size)
@@ -93,5 +99,5 @@ def main():
     print(f"Saved results into {args.outdir}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

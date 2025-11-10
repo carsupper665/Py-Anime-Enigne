@@ -1,4 +1,4 @@
-﻿from ui.services.rmbg_pipeline import clamp_fps
+from ui.services.rmbg_pipeline import clamp_fps
 
 
 def test_clamp_fps_no_limit():

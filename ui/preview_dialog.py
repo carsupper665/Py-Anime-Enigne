@@ -1,9 +1,16 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import os
 from typing import Optional, Callable
 
 from PyQt6.QtCore import Qt, pyqtSignal, QEvent
-from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QSlider
+from PyQt6.QtWidgets import (
+    QDialog,
+    QVBoxLayout,
+    QLabel,
+    QPushButton,
+    QHBoxLayout,
+    QSlider,
+)
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QImageReader
 
 from core.export_context import ExportOptions
@@ -30,7 +37,9 @@ class PreviewImageDialog(QDialog):
         self.setWindowTitle("影格預覽")
         self.setModal(True)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet("QWidget { background:#222; color:#fff; font-family:'Source Han Sans TC'; }")
+        self.setStyleSheet(
+            "QWidget { background:#222; color:#fff; font-family:'Source Han Sans TC'; }"
+        )
 
         self._path = img_path
         self._refresh_fn = refresh_fn
@@ -48,7 +57,9 @@ class PreviewImageDialog(QDialog):
         self.view = QLabel()
         self.view.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.view.setMinimumSize(640, 360)
-        self.view.setStyleSheet("QLabel { background:#111; border:1px solid #333; border-radius:8px; }")
+        self.view.setStyleSheet(
+            "QLabel { background:#111; border:1px solid #333; border-radius:8px; }"
+        )
         v.addWidget(self.view, 1)
         self.view.installEventFilter(self)
 
@@ -61,26 +72,42 @@ class PreviewImageDialog(QDialog):
         v.addLayout(row_f)
 
         row1 = QHBoxLayout()
-        self.sl_h = QSlider(Qt.Orientation.Horizontal); self.sl_h.setRange(1, 60)
-        self.sl_s = QSlider(Qt.Orientation.Horizontal); self.sl_s.setRange(1, 100)
-        self.sl_v = QSlider(Qt.Orientation.Horizontal); self.sl_v.setRange(1, 100)
-        row1.addWidget(QLabel("H")); row1.addWidget(self.sl_h)
-        row1.addWidget(QLabel("S")); row1.addWidget(self.sl_s)
-        row1.addWidget(QLabel("V")); row1.addWidget(self.sl_v)
+        self.sl_h = QSlider(Qt.Orientation.Horizontal)
+        self.sl_h.setRange(1, 60)
+        self.sl_s = QSlider(Qt.Orientation.Horizontal)
+        self.sl_s.setRange(1, 100)
+        self.sl_v = QSlider(Qt.Orientation.Horizontal)
+        self.sl_v.setRange(1, 100)
+        row1.addWidget(QLabel("H"))
+        row1.addWidget(self.sl_h)
+        row1.addWidget(QLabel("S"))
+        row1.addWidget(self.sl_s)
+        row1.addWidget(QLabel("V"))
+        row1.addWidget(self.sl_v)
         v.addLayout(row1)
 
         row2 = QHBoxLayout()
-        self.sl_strength = QSlider(Qt.Orientation.Horizontal); self.sl_strength.setRange(50, 300)
-        row2.addWidget(QLabel("倍率")); row2.addWidget(self.sl_strength)
+        self.sl_strength = QSlider(Qt.Orientation.Horizontal)
+        self.sl_strength.setRange(50, 300)
+        row2.addWidget(QLabel("倍率"))
+        row2.addWidget(self.sl_strength)
         v.addLayout(row2)
 
-        btns = QHBoxLayout(); btns.addStretch(1)
+        btns = QHBoxLayout()
+        btns.addStretch(1)
         self.btn_reload = QPushButton("重新擷取")
         self.btn_apply_hsv = QPushButton("套用到控制")
         self.btn_use_seed = QPushButton("使用取樣座標")
         self.btn_close = QPushButton("關閉")
-        for b in (self.btn_reload, self.btn_apply_hsv, self.btn_use_seed, self.btn_close):
-            b.setStyleSheet("QPushButton { background:#333; color:#EEE; border:none; border-radius:6px; padding:6px 12px; }")
+        for b in (
+            self.btn_reload,
+            self.btn_apply_hsv,
+            self.btn_use_seed,
+            self.btn_close,
+        ):
+            b.setStyleSheet(
+                "QPushButton { background:#333; color:#EEE; border:none; border-radius:6px; padding:6px 12px; }"
+            )
             btns.addWidget(b)
         v.addLayout(btns)
 
@@ -94,8 +121,12 @@ class PreviewImageDialog(QDialog):
             (self.sl_s, "tol_s"),
             (self.sl_v, "tol_v"),
         ):
-            slider.valueChanged.connect(lambda value, k=key: self._on_hsv_change(k, value))
-        self.sl_strength.valueChanged.connect(lambda value: self._on_hsv_change("strength", value / 100.0))
+            slider.valueChanged.connect(
+                lambda value, k=key: self._on_hsv_change(k, value)
+            )
+        self.sl_strength.valueChanged.connect(
+            lambda value: self._on_hsv_change("strength", value / 100.0)
+        )
         self.frame_slider.valueChanged.connect(self._on_seek_frame)
 
         self._prepare_source(img_path)
@@ -181,7 +212,9 @@ class PreviewImageDialog(QDialog):
                 f"Frame: {state.current_frame + 1}/{max(1, info['total_frames'])}  ({self._format_time(seconds)})"
             )
         elif info["is_animated"]:
-            self.frame_label.setText(f"Frame: {state.current_frame + 1}/{max(1, info['total_frames'])}")
+            self.frame_label.setText(
+                f"Frame: {state.current_frame + 1}/{max(1, info['total_frames'])}"
+            )
         else:
             self.frame_label.setText("Frame: -/-  (00:00)")
 
@@ -229,14 +262,20 @@ class PreviewImageDialog(QDialog):
         return f"{m:02d}:{s:02d}"
 
     def eventFilter(self, obj, ev):
-        if obj is self.view and ev.type() == QEvent.Type.MouseButtonPress and self._current_preview is not None:
+        if (
+            obj is self.view
+            and ev.type() == QEvent.Type.MouseButtonPress
+            and self._current_preview is not None
+        ):
             pos = ev.position().toPoint()
             mapped = self._map_click_to_image(pos)
             if mapped is not None:
                 self._service.update_seed(mapped)
                 self.seedSelected.emit(mapped)
                 try:
-                    self.info.setText(f"Seed: {mapped}  H={self.sl_h.value()} S={self.sl_s.value()} V={self.sl_v.value()}")
+                    self.info.setText(
+                        f"Seed: {mapped}  H={self.sl_h.value()} S={self.sl_s.value()} V={self.sl_v.value()}"
+                    )
                 except Exception:
                     pass
                 self._render_current_frame()

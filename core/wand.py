@@ -4,7 +4,9 @@ import cv2
 from typing import Tuple, Dict, Any
 
 
-def compute_mask(bgr: np.ndarray, seed_xy: Tuple[int, int], opts: Dict[str, Any]) -> np.ndarray:
+def compute_mask(
+    bgr: np.ndarray, seed_xy: Tuple[int, int], opts: Dict[str, Any]
+) -> np.ndarray:
     """Compute magic-wand foreground mask (255=FG) from BGR image.
 
     Options (with defaults):
@@ -23,11 +25,17 @@ def compute_mask(bgr: np.ndarray, seed_xy: Tuple[int, int], opts: Dict[str, Any]
         raise ValueError("empty image")
 
     o = {
-        "tolH": 10, "tolS": 60, "tolV": 60,
-        "contiguous": True, "connectivity": 8,
-        "fixed_range": False, "use_edge_barrier": True,
-        "near_radius_ratio": 0.35, "min_keep_area": 400,
-        "morph_open_close": True, "feather_px": 2.0,
+        "tolH": 10,
+        "tolS": 60,
+        "tolV": 60,
+        "contiguous": True,
+        "connectivity": 8,
+        "fixed_range": False,
+        "use_edge_barrier": True,
+        "near_radius_ratio": 0.35,
+        "min_keep_area": 400,
+        "morph_open_close": True,
+        "feather_px": 2.0,
         "invert": False,
     }
     if opts:
@@ -41,8 +49,16 @@ def compute_mask(bgr: np.ndarray, seed_xy: Tuple[int, int], opts: Dict[str, Any]
 
     if not o["contiguous"]:
         Hs, Ss, Vs = map(int, hsv[y, x])
-        lo = (max(0, Hs - int(o["tolH"])), max(0, Ss - int(o["tolS"])) , max(0, Vs - int(o["tolV"])) )
-        hi = (min(179, Hs + int(o["tolH"])), min(255, Ss + int(o["tolS"])) , min(255, Vs + int(o["tolV"])) )
+        lo = (
+            max(0, Hs - int(o["tolH"])),
+            max(0, Ss - int(o["tolS"])),
+            max(0, Vs - int(o["tolV"])),
+        )
+        hi = (
+            min(179, Hs + int(o["tolH"])),
+            min(255, Ss + int(o["tolS"])),
+            min(255, Vs + int(o["tolV"])),
+        )
         mask = cv2.inRange(hsv, lo, hi)
     else:
         ff_mask = np.zeros((h + 2, w + 2), np.uint8)
@@ -53,7 +69,12 @@ def compute_mask(bgr: np.ndarray, seed_xy: Tuple[int, int], opts: Dict[str, Any]
             high = int(np.clip(1.33 * med, 60, 220))
             low = max(1, high // 3)
             edges = cv2.Canny(gray, low, high)
-            bar = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), 1)
+            bar = cv2.morphologyEx(
+                edges,
+                cv2.MORPH_CLOSE,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+                1,
+            )
             bar = cv2.dilate(bar, np.ones((3, 3), np.uint8), 1)
             ff_mask[1:-1, 1:-1][bar > 0] = 255
         flags = cv2.FLOODFILL_MASK_ONLY | (4 if int(o["connectivity"]) == 4 else 8)
@@ -68,7 +89,9 @@ def compute_mask(bgr: np.ndarray, seed_xy: Tuple[int, int], opts: Dict[str, Any]
         mask = 255 - mask
 
     # 連通域合併與去雜
-    num, labels, stats, cents = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
+    num, labels, stats, cents = cv2.connectedComponentsWithStats(
+        (mask > 0).astype(np.uint8), connectivity=8
+    )
     if num > 1:
         areas = stats[:, cv2.CC_STAT_AREA]
         areas[0] = 0
@@ -96,4 +119,3 @@ def compute_mask(bgr: np.ndarray, seed_xy: Tuple[int, int], opts: Dict[str, Any]
         mask = (alpha * 255).astype(np.uint8)
 
     return mask
-

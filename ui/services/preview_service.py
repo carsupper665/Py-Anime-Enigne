@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -28,15 +28,17 @@ class FrameSource:
 @dataclass
 class PreviewState:
     current_frame: int = 0
-    hsv: Dict[str, float] = field(default_factory=lambda: {
-        "tol_h": 10,
-        "tol_s": 60,
-        "tol_v": 60,
-        "strength": 1.5,
-        "erode_iter": 1,
-        "dilate_iter": 0,
-        "feather_px": 2.0,
-    })
+    hsv: Dict[str, float] = field(
+        default_factory=lambda: {
+            "tol_h": 10,
+            "tol_s": 60,
+            "tol_v": 60,
+            "strength": 1.5,
+            "erode_iter": 1,
+            "dilate_iter": 0,
+            "feather_px": 2.0,
+        }
+    )
     seed: Optional[Tuple[int, int]] = None
 
 
@@ -64,7 +66,9 @@ class PreviewService:
                 return None
             return self._normalize_frame(frame)
 
-        self._source = FrameSource(total_frames=1, fps=0.0, loader=loader, is_video=False, is_animated=False)
+        self._source = FrameSource(
+            total_frames=1, fps=0.0, loader=loader, is_video=False, is_animated=False
+        )
         self._state.current_frame = 0
         self._cache.clear()
 
@@ -74,7 +78,11 @@ class PreviewService:
         if not cap.isOpened():
             raise RuntimeError("無法開啟影片來源")
         total = int(cap.get(cv2_mod.CAP_PROP_FRAME_COUNT)) or 0
-        fps = float(cap.get(cv2_mod.CAP_PROP_FPS)) if cap.get(cv2_mod.CAP_PROP_FPS) else 0.0
+        fps = (
+            float(cap.get(cv2_mod.CAP_PROP_FPS))
+            if cap.get(cv2_mod.CAP_PROP_FPS)
+            else 0.0
+        )
         cap.release()
         if total <= 0:
             total = 1
@@ -92,7 +100,9 @@ class PreviewService:
             finally:
                 capture.release()
 
-        self._source = FrameSource(total_frames=total, fps=fps, loader=loader, is_video=True, is_animated=False)
+        self._source = FrameSource(
+            total_frames=total, fps=fps, loader=loader, is_video=True, is_animated=False
+        )
         self._state.current_frame = 0
         self._cache.clear()
 
@@ -106,9 +116,9 @@ class PreviewService:
             local_reader = QImageReader(path)
             local_reader.setDecideFormatFromContent(True)
             try:
-                if hasattr(local_reader, 'jumpToImage'):
+                if hasattr(local_reader, "jumpToImage"):
                     local_reader.jumpToImage(int(index))
-                elif hasattr(local_reader, 'setCurrentImageNumber'):
+                elif hasattr(local_reader, "setCurrentImageNumber"):
                     local_reader.setCurrentImageNumber(int(index))
             except Exception:
                 pass
@@ -123,7 +133,9 @@ class PreviewService:
             arr = np.frombuffer(ptr, np.uint8).reshape((height, width, 3))
             return self._normalize_frame(arr[:, :, ::-1].copy())
 
-        self._source = FrameSource(total_frames=total, fps=0.0, loader=loader, is_video=False, is_animated=True)
+        self._source = FrameSource(
+            total_frames=total, fps=0.0, loader=loader, is_video=False, is_animated=True
+        )
         self._state.current_frame = 0
         self._cache.clear()
 
@@ -133,7 +145,12 @@ class PreviewService:
     # --- State helpers ---
     def get_source_info(self) -> Dict[str, object]:
         if not self._source:
-            return {"total_frames": 1, "fps": 0.0, "is_video": False, "is_animated": False}
+            return {
+                "total_frames": 1,
+                "fps": 0.0,
+                "is_video": False,
+                "is_animated": False,
+            }
         return {
             "total_frames": self._source.total_frames,
             "fps": self._source.fps,
@@ -221,7 +238,9 @@ class PreviewService:
             QImage.Format.Format_RGBA8888,
         ).copy()
 
-    def _to_preview_frame(self, bgr: np.ndarray, overlay: Optional[QImage]) -> PreviewFrame:
+    def _to_preview_frame(
+        self, bgr: np.ndarray, overlay: Optional[QImage]
+    ) -> PreviewFrame:
         rgb = np.ascontiguousarray(bgr[:, :, ::-1])
         h, w = rgb.shape[:2]
         qimg = QImage(

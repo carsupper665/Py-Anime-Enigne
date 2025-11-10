@@ -3,12 +3,22 @@
 from __future__ import annotations
 import os
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout,
-    QFileDialog, QListWidget, QListWidgetItem,
+    QWidget,
+    QVBoxLayout,
+    QLabel,
+    QPushButton,
+    QHBoxLayout,
+    QFileDialog,
+    QListWidget,
+    QListWidgetItem,
 )
-from PyQt6.QtCore import (Qt, pyqtSignal, pyqtSlot, QSize,
-                          )
-from PyQt6.QtGui import (QPixmap, QMovie)
+from PyQt6.QtCore import (
+    Qt,
+    pyqtSignal,
+    pyqtSlot,
+    QSize,
+)
+from PyQt6.QtGui import QPixmap, QMovie
 from logging import Logger
 from .osd import OSD
 
@@ -35,11 +45,18 @@ BTN_STYLE = """
         }
 """
 
+
 class EditPage(QWidget):
     on_exception = pyqtSignal(Exception)
-    toast = pyqtSignal(dict) # payload: {level, title, message, duration}
+    toast = pyqtSignal(dict)  # payload: {level, title, message, duration}
     sync_gifs = pyqtSignal(dict)
-    def __init__(self, parent=None, logger: Logger=None, activated_gifs: dict[str:QWidget] | None = None):
+
+    def __init__(
+        self,
+        parent=None,
+        logger: Logger = None,
+        activated_gifs: dict[str:QWidget] | None = None,
+    ):
         super().__init__(parent)
         self.setObjectName("EditPage")
         self.logger = logger
@@ -86,11 +103,25 @@ class EditPage(QWidget):
             }
         """)
         self.hide_btn = QPushButton("hide", self)
-        self.hide_btn.setStyleSheet(BTN_STYLE % {"btn_color": "#2c7ce5", "text_color": "#FFF",
-                                                "hover_color": "#3c8ce5", "press_color": "#1c6ce5"})
+        self.hide_btn.setStyleSheet(
+            BTN_STYLE
+            % {
+                "btn_color": "#2c7ce5",
+                "text_color": "#FFF",
+                "hover_color": "#3c8ce5",
+                "press_color": "#1c6ce5",
+            }
+        )
         self.close_btn = QPushButton("close", self)
-        self.close_btn.setStyleSheet(BTN_STYLE % {"btn_color": "#e52c2c", "text_color": "#EEE",
-                                                 "hover_color": "#e53c3c", "press_color": "#e51c1c"})
+        self.close_btn.setStyleSheet(
+            BTN_STYLE
+            % {
+                "btn_color": "#e52c2c",
+                "text_color": "#EEE",
+                "hover_color": "#e53c3c",
+                "press_color": "#e51c1c",
+            }
+        )
         self.hide_btn.setEnabled(False)
         self.close_btn.setEnabled(False)
         self.hide_btn.clicked.connect(self._hide_selected)
@@ -106,8 +137,10 @@ class EditPage(QWidget):
         # row.addWidget(self.preview)
 
         v.addLayout(row)
-    
-    def set_btns_enabled(self,):
+
+    def set_btns_enabled(
+        self,
+    ):
         self.hide_btn.setEnabled(not self.hide_btn.isEnabled())
         self.close_btn.setEnabled(not self.close_btn.isEnabled())
 
@@ -123,13 +156,13 @@ class EditPage(QWidget):
         if isinstance(payload, str) and mode == "append":
             self.g_list.addItem(QListWidgetItem(payload))
             return
-        
+
         if isinstance(payload, str) and mode == "del":
             items = self.g_list.findItems(payload, Qt.MatchFlag.MatchExactly)
             for it in items:
                 self.g_list.takeItem(self.g_list.row(it))
             return
-            
+
         names = [k for k in payload.keys()]
         if mode == "replace":
             self.g_list.clear()
@@ -139,8 +172,8 @@ class EditPage(QWidget):
             self.g_list.addItem(it)
 
     def _fit_size(self, box: QSize) -> QSize:
-        return QSize(max(1, box.width()-16), max(1, box.height()-16))
-    
+        return QSize(max(1, box.width() - 16), max(1, box.height() - 16))
+
     def _set_movie(self, movie: QMovie):
         self._clear_movie()
         self._movie = movie
@@ -159,9 +192,9 @@ class EditPage(QWidget):
         return pix.scaled(
             self.preview.size() - QSize(16, 16),
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
+            Qt.TransformationMode.SmoothTransformation,
         )
-    
+
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
         if self._movie:
@@ -179,12 +212,14 @@ class EditPage(QWidget):
             self.logger.debug(f"Close selected gif: {item.text()}")
         else:
             self.logger.warning(f"Tried to close non-existing gif: {item.text()}")
-            self.toast.emit({
-                "level": 'warn',
-                "title": "關閉失敗",
-                "message": f"找不到名稱為 {item.text()} 的 GIF。",
-                "duration": 3000
-            })
+            self.toast.emit(
+                {
+                    "level": "warn",
+                    "title": "關閉失敗",
+                    "message": f"找不到名稱為 {item.text()} 的 GIF。",
+                    "duration": 3000,
+                }
+            )
 
     def _hide_selected(self):
         self.set_btns_enabled()
@@ -196,12 +231,14 @@ class EditPage(QWidget):
             self.logger.debug(f"Hide selected gif: {item.text()}")
         else:
             self.logger.warning(f"Tried to hide non-existing gif: {item.text()}")
-            self.toast.emit({
-                "level": 'warn',
-                "title": "隱藏失敗",
-                "message": f"找不到名稱為 {item.text()} 的 GIF。",
-                "duration": 3000
-            })
+            self.toast.emit(
+                {
+                    "level": "warn",
+                    "title": "隱藏失敗",
+                    "message": f"找不到名稱為 {item.text()} 的 GIF。",
+                    "duration": 3000,
+                }
+            )
 
     @pyqtSlot()
     def _show_selected(self):
@@ -233,11 +270,13 @@ class EditPage(QWidget):
             self._sync()
         except KeyError:
             self.logger.warning(f"Tried to delete non-existing gif {name}.")
-            self.toast.emit({
-                "level": 'warn',
-                "title": "刪除失敗",
-                "message": f"找不到名稱為 {name} 的 GIF。",
-                "duration": 3000
-            })
+            self.toast.emit(
+                {
+                    "level": "warn",
+                    "title": "刪除失敗",
+                    "message": f"找不到名稱為 {name} 的 GIF。",
+                    "duration": 3000,
+                }
+            )
         except Exception as e:
             self.on_exception.emit(e)

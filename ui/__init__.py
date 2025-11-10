@@ -4,9 +4,16 @@ from .loading_page import LoadingPage
 from .toast import Toast, LoadingToast
 from .home_page import HomePage
 from .logger import loggerFactory, C
-from .ui_error import UnexpectedError, connect_crash_dialog, MainApp, install_global_handlers
+from .ui_error import (
+    UnexpectedError,
+    connect_crash_dialog,
+    MainApp,
+    install_global_handlers,
+)
+
 try:
     from .threads import *
+
     _THREADS_AVAILABLE = True
 except ImportError:
     _THREADS_AVAILABLE = False

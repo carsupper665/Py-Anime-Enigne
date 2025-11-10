@@ -15,7 +15,9 @@ from core.diagnostics import log_structured
 class TempDirectoryManager:
     """Manage unique temporary files under a shared directory."""
 
-    def __init__(self, base_dir: str = "./temp", logger: Optional[logging.Logger] = None) -> None:
+    def __init__(
+        self, base_dir: str = "./temp", logger: Optional[logging.Logger] = None
+    ) -> None:
         self.base_path = Path(base_dir)
         self.base_path.mkdir(parents=True, exist_ok=True)
         self._tracked: set[Path] = set()
@@ -43,7 +45,13 @@ class TempDirectoryManager:
         shutil.copyfile(src, target)
         if not persistent:
             self._tracked.add(target)
-        self._log("temp.copy", diagnostic_id, src=src, target=str(target), persistent=persistent)
+        self._log(
+            "temp.copy",
+            diagnostic_id,
+            src=src,
+            target=str(target),
+            persistent=persistent,
+        )
         return str(target)
 
     def register(self, path: str, *, diagnostic_id: Optional[str] = None) -> None:
@@ -51,7 +59,12 @@ class TempDirectoryManager:
         self._tracked.add(p)
         self._log("temp.register", diagnostic_id, path=str(p))
 
-    def cleanup(self, paths: Optional[Iterable[str]] = None, *, diagnostic_id: Optional[str] = None) -> None:
+    def cleanup(
+        self,
+        paths: Optional[Iterable[str]] = None,
+        *,
+        diagnostic_id: Optional[str] = None,
+    ) -> None:
         candidates = paths if paths is not None else [str(p) for p in self._tracked]
         for item in candidates:
             try:
@@ -60,7 +73,9 @@ class TempDirectoryManager:
                     p.unlink()
                     self._log("temp.cleanup.success", diagnostic_id, path=str(p))
             except Exception as exc:
-                self._log("temp.cleanup.error", diagnostic_id, path=item, error=repr(exc))
+                self._log(
+                    "temp.cleanup.error", diagnostic_id, path=item, error=repr(exc)
+                )
                 continue
             finally:
                 self._tracked.discard(Path(item))
@@ -86,7 +101,9 @@ class ExportCommandBuilder:
         diagnostic_id: Optional[str] = None,
     ) -> List[str]:
         if profile == self.PROFILE_WEBP:
-            profiled = self._apply_webp_profile(args, options, diagnostic_id=diagnostic_id)
+            profiled = self._apply_webp_profile(
+                args, options, diagnostic_id=diagnostic_id
+            )
         else:
             profiled = list(args)
         self._log(
@@ -187,7 +204,9 @@ Runner = Callable[[List[str]], Tuple[bool, str]]
 
 def default_runner(args: List[str]) -> Tuple[bool, str]:
     try:
-        proc = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        proc = subprocess.run(
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True
+        )
         return True, proc.stderr.decode("utf-8", "ignore")
     except subprocess.CalledProcessError as exc:
         return False, exc.stderr.decode("utf-8", "ignore")
@@ -224,7 +243,9 @@ class VideoExportService:
         *,
         diagnostic_id: Optional[str] = None,
     ) -> CommandResult:
-        args = self._builder.build_trim_command(src, start_ms, end_ms, dest, diagnostic_id=diagnostic_id)
+        args = self._builder.build_trim_command(
+            src, start_ms, end_ms, dest, diagnostic_id=diagnostic_id
+        )
         args = self._builder.apply_profile(
             args,
             ExportCommandBuilder.PROFILE_WEBP,

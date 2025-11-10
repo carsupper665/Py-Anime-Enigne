@@ -1,16 +1,18 @@
-#ui/loading_page.py
+# ui/loading_page.py
 from PyQt6.QtWidgets import (
     QLabel,
     QWidget,
     QVBoxLayout,
     QProgressBar,
 )
-from PyQt6.QtCore import Qt,pyqtSlot, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSlot, pyqtSignal
 from logging import Logger
+
 
 class LoadingPage(QWidget):
     on_exception = pyqtSignal(Exception)
-    def __init__(self, parent=None, logger: Logger=None):
+
+    def __init__(self, parent=None, logger: Logger = None):
         super().__init__(parent)
         self.setObjectName("LoadingPage")
         self.setObjectName(self.__class__.__name__)
@@ -32,11 +34,11 @@ class LoadingPage(QWidget):
                 color: #FFFFFF;
                                  
             """)
-        
+
         self.bar = QProgressBar(self)
         self.bar.setRange(0, 100)  # 不定長度可改成 (0,0)
         # self.bar.setValue(20)
-        self.bar.setTextVisible(False) 
+        self.bar.setTextVisible(False)
         self.bar.setFixedSize(500, 42)
 
         self.bar.setStyleSheet("""
@@ -55,8 +57,9 @@ class LoadingPage(QWidget):
             }
         """)
 
-        v.addWidget(self.label); v.addWidget(self.bar, alignment=Qt.AlignmentFlag.AlignHCenter)
-    
+        v.addWidget(self.label)
+        v.addWidget(self.bar, alignment=Qt.AlignmentFlag.AlignHCenter)
+
         v.addStretch()
 
     @pyqtSlot(dict)
@@ -67,7 +70,7 @@ class LoadingPage(QWidget):
 
         if (value is None) and (status_text is None) or (id is None):
             if id is None:
-               self.logger.warning("No signalId in progress data")
+                self.logger.warning("No signalId in progress data")
             return
         try:
             if value is not None and type(value) == int:

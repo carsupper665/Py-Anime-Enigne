@@ -7,6 +7,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize
 from PyQt6.QtGui import QIcon, QFont
+
+
 class NavBar(QWidget):
     tabChanged = pyqtSignal(int)  # 自定義信號，發出選中的tab索引
 
@@ -42,31 +44,57 @@ class NavBar(QWidget):
 
         self.buttons = []
 
-        self.dashboard_btn = self._make_button("", icon_path=r"./src/images/home_btn.png", page_index=0, tooltip="首頁")
+        self.dashboard_btn = self._make_button(
+            "", icon_path=r"./src/images/home_btn.png", page_index=0, tooltip="首頁"
+        )
         layout.addWidget(self.dashboard_btn)
 
-        self.add = self._make_button("", icon_path=r"./src/images/icon_add.png", page_index=1, tooltip="Add Gif")
+        self.add = self._make_button(
+            "", icon_path=r"./src/images/icon_add.png", page_index=1, tooltip="Add Gif"
+        )
         layout.addWidget(self.add)
 
-        self.set_gif = self._make_button("", icon_path=r"./src/images/view_btn.png", page_index=2, tooltip="Add gif to desktop")
+        self.set_gif = self._make_button(
+            "",
+            icon_path=r"./src/images/view_btn.png",
+            page_index=2,
+            tooltip="Add gif to desktop",
+        )
         layout.addWidget(self.set_gif)
 
         # 設定頁
         try:
-            self.settings_btn = self._make_button("", icon_path=r"./src/images/settings_btn.png", page_index=3, tooltip="設定")
+            self.settings_btn = self._make_button(
+                "",
+                icon_path=r"./src/images/settings_btn.png",
+                page_index=3,
+                tooltip="設定",
+            )
             layout.addWidget(self.settings_btn)
         except Exception:
             # 圖示缺失時也允許建立按鈕
-            self.settings_btn = self._make_button("設定", icon_path=None, page_index=3, tooltip="設定")
+            self.settings_btn = self._make_button(
+                "設定", icon_path=None, page_index=3, tooltip="設定"
+            )
             layout.addWidget(self.settings_btn)
 
-        layout.addItem(QSpacerItem(20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        layout.addItem(
+            QSpacerItem(
+                20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding
+            )
+        )
         # layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
-    def _make_button(self, text: str, icon_path: str | None, page_index: int, tooltip: str = "") -> QToolButton:
+    def _make_button(
+        self, text: str, icon_path: str | None, page_index: int, tooltip: str = ""
+    ) -> QToolButton:
         btn = QToolButton(self)
         btn.setText(text)
-        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon if text == "" else Qt.ToolButtonStyle.ToolButtonTextOnly)
+        btn.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+            if text == ""
+            else Qt.ToolButtonStyle.ToolButtonTextOnly
+        )
         btn.setFixedHeight(55)
         btn.setFont(QFont("Inter", 10))
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -111,7 +139,11 @@ QToolButton:hover {
         border: 2px solid rgba(192, 192, 192, 255);
     }
 """
-        border = """QToolButton{padding-left: 12px;}\nQToolButton:checked{padding: 10px;}\nQToolButton:hover {padding: 10px;}""" if icon_path is not None else ""
+        border = (
+            """QToolButton{padding-left: 12px;}\nQToolButton:checked{padding: 10px;}\nQToolButton:hover {padding: 10px;}"""
+            if icon_path is not None
+            else ""
+        )
 
         btn.setStyleSheet(base + "\n" + c + "\n" + active + "\n" + border)
 
@@ -119,11 +151,17 @@ QToolButton:hover {
         self.buttons.append(btn)
         return btn
 
-    def _make_action_button(self, text: str, icon_path: str | None, tooltip: str = "") -> QToolButton:
+    def _make_action_button(
+        self, text: str, icon_path: str | None, tooltip: str = ""
+    ) -> QToolButton:
         """Create an action button (like logout) that doesn't have checked state"""
         btn = QToolButton(self)
         btn.setText(text)
-        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon if text == "" else Qt.ToolButtonStyle.ToolButtonTextOnly)
+        btn.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+            if text == ""
+            else Qt.ToolButtonStyle.ToolButtonTextOnly
+        )
         btn.setFixedHeight(56)
         btn.setFont(QFont("Inter", 10))
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -212,6 +250,6 @@ QToolButton:hover {
             except Exception as e:
                 print(e)
                 b.setDisabled(False)
-    
+
     def set_enabled(self, page_index: int = None, enabled: bool = True):
         self.set_disabled(page_index, not enabled)

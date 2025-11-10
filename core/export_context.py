@@ -41,7 +41,9 @@ class ExportContext:
     env: Dict[str, str]
 
 
-def parse_time_range(opts: Optional[Dict[str, Any]]) -> Optional[Tuple[Optional[int], Optional[int]]]:
+def parse_time_range(
+    opts: Optional[Dict[str, Any]],
+) -> Optional[Tuple[Optional[int], Optional[int]]]:
     if not isinstance(opts, dict):
         return None
     range_cfg = opts.get("range")
@@ -89,10 +91,25 @@ def _get_export_options(config: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def merge_export_settings(config: Dict[str, Any], overrides: Optional[Dict[str, Any]] = None) -> ExportOptions:
+def merge_export_settings(
+    config: Dict[str, Any], overrides: Optional[Dict[str, Any]] = None
+) -> ExportOptions:
     base = _get_export_options(config)
     if overrides:
-        base.update({k: overrides[k] for k in ("quality", "max_fps", "loop", "target_path", "direct_copy", "profile") if k in overrides})
+        base.update(
+            {
+                k: overrides[k]
+                for k in (
+                    "quality",
+                    "max_fps",
+                    "loop",
+                    "target_path",
+                    "direct_copy",
+                    "profile",
+                )
+                if k in overrides
+            }
+        )
 
     try:
         quality = int(base.get("quality", 75))
@@ -104,7 +121,11 @@ def merge_export_settings(config: Dict[str, Any], overrides: Optional[Dict[str, 
         max_fps = 15
     loop = bool(base.get("loop", True))
     target_path_value = base.get("target_path")
-    target_path = str(target_path_value) if isinstance(target_path_value, str) and target_path_value else None
+    target_path = (
+        str(target_path_value)
+        if isinstance(target_path_value, str) and target_path_value
+        else None
+    )
     direct_copy = bool(base.get("direct_copy", False))
     profile = str(base.get("profile", "webp") or "webp").lower()
     return ExportOptions(
@@ -117,7 +138,9 @@ def merge_export_settings(config: Dict[str, Any], overrides: Optional[Dict[str, 
     )
 
 
-def apply_engine_overrides(engine: str, opts: Optional[Dict[str, Any]], config: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+def apply_engine_overrides(
+    engine: str, opts: Optional[Dict[str, Any]], config: Dict[str, Any]
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     hsv_cfg: Dict[str, Any] = {}
     base_hsv = config.get("hsv", {}) if isinstance(config.get("hsv"), dict) else {}
     hsv_cfg.update(base_hsv)
@@ -132,21 +155,29 @@ def apply_engine_overrides(engine: str, opts: Optional[Dict[str, Any]], config: 
     return hsv_cfg, wand_cfg
 
 
-def build_export_context(src: str, prefer: str, opts: Optional[Dict[str, Any]], config: Dict[str, Any]) -> ExportContext:
+def build_export_context(
+    src: str, prefer: str, opts: Optional[Dict[str, Any]], config: Dict[str, Any]
+) -> ExportContext:
     if not src:
         raise ExportContextError("Source path is required.")
     prefer = (prefer or "auto") or "auto"
     engine = (prefer or config.get("engine", "hsv")).lower()
-    output_cfg = config.get("output", {}) if isinstance(config.get("output"), dict) else {}
+    output_cfg = (
+        config.get("output", {}) if isinstance(config.get("output"), dict) else {}
+    )
     output_dir = output_cfg.get("dir", "./animes") or "./animes"
     image_format = str(output_cfg.get("image", "webp")).lower()
     anim_format = str(output_cfg.get("anim", "webp")).lower()
     range_ms = parse_time_range(opts or {})
 
     export_overrides = (opts or {}).get("export") if isinstance(opts, dict) else None
-    export_options = merge_export_settings(config, export_overrides if isinstance(export_overrides, dict) else None)
+    export_options = merge_export_settings(
+        config, export_overrides if isinstance(export_overrides, dict) else None
+    )
 
-    hsv_cfg, wand_cfg = apply_engine_overrides(engine, opts if isinstance(opts, dict) else None, config)
+    hsv_cfg, wand_cfg = apply_engine_overrides(
+        engine, opts if isinstance(opts, dict) else None, config
+    )
 
     env_updates: Dict[str, str] = {}
     model_path = ""

@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 ui/threads.py — 背景移除整合版
 
@@ -11,15 +11,16 @@ ui/threads.py — 背景移除整合版
 
 相依：PyQt6, Pillow(PIL), numpy, opencv-python, (選用) openvino, rembg, ffmpeg
 """
+
 DEFAULTS = {
-    "border": 12,            # 取四邊厚度作背景取樣
-    "kmeans_k": 2,           # 邊框分群以避開陰影
-    "use_mahalanobis": True, # True=用馬氏距離，False=用歐氏距離
+    "border": 12,  # 取四邊厚度作背景取樣
+    "kmeans_k": 2,  # 邊框分群以避開陰影
+    "use_mahalanobis": True,  # True=用馬氏距離，False=用歐氏距離
     "morph_open_close": True,
-    "keep_largest": True,    # 只留最大前景
+    "keep_largest": True,  # 只留最大前景
     "min_keep_area": 400,
     "near_radius_ratio": 0.35,
-    "feather_px": 2.5
+    "feather_px": 2.5,
 }
 import cv2
 import logging
@@ -29,7 +30,8 @@ import io
 import time
 from .ui_error import FFmpegNotFoundError
 from dataclasses import dataclass, asdict
-from typing import List, Dict, Optional, Tuple
+from functools import partial
+from typing import List, Dict, Optional, Tuple, Callable
 from logging import Logger
 
 import numpy as np
@@ -37,36 +39,57 @@ from PIL import Image
 from core.diagnostics import attach_diagnostic, generate_diagnostic_id, log_structured
 
 from PyQt6.QtCore import (
-    QObject, QThread, pyqtSignal, pyqtSlot, QSize, QEventLoop, QTimer
+    QObject,
+    QThread,
+    pyqtSignal,
+    pyqtSlot,
+    QSize,
+    QEventLoop,
+    QTimer,
 )
 from PyQt6.QtGui import QImageReader
-from ui.services.rmbg_pipeline import (InputRouterService, ImagePipeline, VideoPipeline, EncoderService, ExportRuntimeOptions)
+from ui.services.rmbg_pipeline import (
+    InputRouterService,
+    ImagePipeline,
+    VideoPipeline,
+    EncoderService,
+    ExportRuntimeOptions,
+)
+
+
 def _estimate_bg_lab_from_borders(lab, border=10, k=2):
     h, w = lab.shape[:2]
-    S = np.vstack([
-        lab[0:border, :, :].reshape(-1,3),
-        lab[h-border:h, :, :].reshape(-1,3),
-        lab[:, 0:border, :].reshape(-1,3),
-        lab[:, w-border:w, :].reshape(-1,3)
-    ]).astype(np.float32)
+    S = np.vstack(
+        [
+            lab[0:border, :, :].reshape(-1, 3),
+            lab[h - border : h, :, :].reshape(-1, 3),
+            lab[:, 0:border, :].reshape(-1, 3),
+            lab[:, w - border : w, :].reshape(-1, 3),
+        ]
+    ).astype(np.float32)
 
     if k >= 2 and S.shape[0] >= k:
-        criteria = (cv2.TERM_CRITERIA_EPS+cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
-        _ret, labels, centers = cv2.kmeans(S, k, None, criteria, 3, cv2.KMEANS_PP_CENTERS)
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+        _ret, labels, centers = cv2.kmeans(
+            S, k, None, criteria, 3, cv2.KMEANS_PP_CENTERS
+        )
         bg = centers[np.bincount(labels.ravel()).argmax()]
-        cluster = S[labels.ravel()==np.bincount(labels.ravel()).argmax()]
+        cluster = S[labels.ravel() == np.bincount(labels.ravel()).argmax()]
     else:
         bg = np.median(S, axis=0)
         cluster = S
 
-    cov = np.cov(cluster.T) + np.eye(3)*1e-6   # 防奇異矩陣
+    cov = np.cov(cluster.T) + np.eye(3) * 1e-6  # 防奇異矩陣
     inv_cov = np.linalg.inv(cov)
     mean = bg.astype(np.float32)
     return mean, inv_cov
 
+
 def _bg_mask_by_color_and_border(bgr, opts):
     # BGR -> Lab（用 float64，後續距離與逆協方差一致）
-    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float64)  # cvtColor 說明見官方文件。 
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(
+        np.float64
+    )  # cvtColor 說明見官方文件。
     mean, inv_cov = _estimate_bg_lab_from_borders(
         lab, border=int(opts["border"]), k=int(opts["kmeans_k"])
     )  # 回傳的 mean, inv_cov 已基於邊框樣本計算
@@ -77,9 +100,9 @@ def _bg_mask_by_color_and_border(bgr, opts):
     # 距離圖：Mahalanobis 或 Euclidean（二擇一）
     if opts.get("use_mahalanobis", True):
         # 向量化馬氏距離，避免 cv2.Mahalanobis 的 dtype 斷言
-        diff = X - mean.astype(np.float64)                   # (N,3)
-        inv_cov = inv_cov.astype(np.float64)                 # (3,3)
-        d = np.sqrt(np.einsum('ij,jk,ik->i', diff, inv_cov, diff))  # (N,)
+        diff = X - mean.astype(np.float64)  # (N,3)
+        inv_cov = inv_cov.astype(np.float64)  # (3,3)
+        d = np.sqrt(np.einsum("ij,jk,ik->i", diff, inv_cov, diff))  # (N,)
     else:
         d = np.linalg.norm(X - mean.astype(np.float64), axis=1)
 
@@ -87,10 +110,14 @@ def _bg_mask_by_color_and_border(bgr, opts):
 
     # Otsu 取閾：距離小=背景
     dist_u8 = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    _thr, mask_bg0 = cv2.threshold(dist_u8, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    _thr, mask_bg0 = cv2.threshold(
+        dist_u8, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    )
 
     # 只保留「接觸影像邊界」的連通塊為背景
-    num, labels, stats, _ = cv2.connectedComponentsWithStats((mask_bg0 > 0).astype(np.uint8), connectivity=4)
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(
+        (mask_bg0 > 0).astype(np.uint8), connectivity=4
+    )
     touch = np.zeros(num, dtype=bool)
     if num > 1:
         touch[labels[0, :]] = True
@@ -103,6 +130,7 @@ def _bg_mask_by_color_and_border(bgr, opts):
         if touch[i]:
             bg[labels == i] = 255
     return bg
+
 
 # =============================
 # 基礎資料結構
@@ -140,7 +168,9 @@ class LoadThread(QObject):
             loop.quit()
 
         def on_error(e):
-            self.progress.emit({"signalId": "load", "value": v, "status": f"error: {e}"})
+            self.progress.emit(
+                {"signalId": "load", "value": v, "status": f"error: {e}"}
+            )
             loop.quit()
 
         self.loader.reload_finished.connect(on_done)
@@ -265,24 +295,34 @@ class _LoaderWorker(QObject):
 # HSV 參數（可調強度）
 from dataclasses import dataclass
 
+
 @dataclass
 class HSVOpts:
-    tol_h: int = 10        # 基本 Hue 容忍
-    tol_s: int = 60        # 基本 Saturation 容忍
-    tol_v: int = 60        # 基本 Value 容忍
+    tol_h: int = 10  # 基本 Hue 容忍
+    tol_s: int = 60  # 基本 Saturation 容忍
+    tol_v: int = 60  # 基本 Value 容忍
     strength: float = 1.5  # 強度倍率（>1 更寬鬆、邊界更吃掉）
-    erode_iter: int = 1    # 侵蝕次數（吃掉亮邊）
-    dilate_iter: int = 0   # 膨脹次數
+    erode_iter: int = 1  # 侵蝕次數（吃掉亮邊）
+    dilate_iter: int = 0  # 膨脹次數
     feather_px: float = 2.0  # 距離轉換羽化半徑（像素）
     use_guided: bool = False  # 如有 ximgproc，可啟用 edge-aware 平滑
+
+
+@dataclass
+class _ThreadContext:
+    diag_id: str
+    thread: QThread
+    worker: "_RmbgWorker"
+
+
 # =============================
 class RmbgThread(QObject):
     """非阻塞去背：
-        worker = RmbgThread(logger)
-        worker.progress.connect(lambda p: ...)
-        worker.finished.connect(lambda payload: ...)
-        worker.error.connect(lambda e: ...)
-        worker.remove_bg(src_path, out_dir='./animes', prefer='auto', engine='rembg')
+    worker = RmbgThread(logger)
+    worker.progress.connect(lambda p: ...)
+    worker.finished.connect(lambda payload: ...)
+    worker.error.connect(lambda e: ...)
+    worker.remove_bg(src_path, out_dir='./animes', prefer='auto', engine='rembg')
     """
 
     progress = pyqtSignal(dict)  # {signalId, value, status}
@@ -296,92 +336,147 @@ class RmbgThread(QObject):
     def __init__(self, logger: Logger):
         super().__init__()
         self.logger = logger
+        self._jobs: Dict[str, _ThreadContext] = {}
+        # Backward-compat placeholders (unused after lifecycle refactor)
         self._thread: Optional[QThread] = None
-        self._worker: Optional[_RmbgWorker] = None
+        self._worker: Optional["_RmbgWorker"] = None
 
-    def remove_bg(self, src_path: str, out_dir: str = "./animes",
-                  prefer: str = "auto", engine: str = "hsv",
-                  hsv_cfg: dict | None = None, wand: dict | None = None,
-                  image_format: str | None = None, anim_format: str | None = None,
-                  range_ms: tuple[int | None, int | None] | None = None,
-                  export_opts: dict | None = None,
-                  diagnostic_id: Optional[str] = None): # rembg / openvino / hsv / wand
-        # 防止對已刪除的 QThread 呼叫 isRunning()
-        if self._thread is not None:
-            try:
-                if self._thread.isRunning():
-                    if hasattr(self._worker, 'rembg_is_finished'):
-                        if self._worker.rembg_is_finished():
-                            print("Previous rembg job already finished, starting new one...")
-                            self._thread.quit()
-                            self._thread.wait(100)
-                            self._thread = None
-                    else:
-                        self.progress.emit({"signalId": "rmbg", "value": 100, "status": "deduplicated"})
-                        return
-            except RuntimeError:
-                self._thread = None
-        self._worker = None
-        self._thread = QThread()
+    def remove_bg(
+        self,
+        src_path: str,
+        out_dir: str = "./animes",
+        prefer: str = "auto",
+        engine: str = "hsv",
+        hsv_cfg: dict | None = None,
+        wand: dict | None = None,
+        image_format: str | None = None,
+        anim_format: str | None = None,
+        range_ms: tuple[int | None, int | None] | None = None,
+        export_opts: dict | None = None,
+        diagnostic_id: Optional[str] = None,
+    ) -> str:  # rembg / openvino / hsv / wand
         effective_opts = export_opts or {}
-        diag = diagnostic_id or effective_opts.get("diagnostic_id")
-        self._worker = _RmbgWorker(src_path, out_dir, prefer, engine, self.logger,
-                                   hsv_cfg=hsv_cfg or {}, wand_cfg=wand or {},
-                                   image_format=(image_format or 'webp'),
-                                   anim_format=(anim_format or 'webp'),
-                                   range_ms=range_ms,
-                                   export_opts=effective_opts,
-                                   diagnostic_id=diag)
-        self._worker.moveToThread(self._thread)
+        diag = (
+            diagnostic_id
+            or effective_opts.get("diagnostic_id")
+            or generate_diagnostic_id()
+        )
+        if diag in self._jobs:
+            self._log(logging.WARNING, "rmbg.job.replaced", diag, src=src_path)
+            self._shutdown_job(diag)
 
-        # wiring
-        self._thread.started.connect(self._worker.do_remove)
-        self._worker.progress.connect(self.progress)
-        self._worker.finished.connect(self._on_worker_finished)
-        self._worker.error.connect(self._on_worker_error)
+        thread = QThread()
+        worker = _RmbgWorker(
+            src_path,
+            out_dir,
+            prefer,
+            engine,
+            self.logger,
+            hsv_cfg=hsv_cfg or {},
+            wand_cfg=wand or {},
+            image_format=(image_format or "webp"),
+            anim_format=(anim_format or "webp"),
+            range_ms=range_ms,
+            export_opts=effective_opts,
+            diagnostic_id=diag,
+        )
+        context = _ThreadContext(diag_id=diag, thread=thread, worker=worker)
+        self._jobs[diag] = context
+        worker.moveToThread(thread)
 
-        self._thread.finished.connect(self._worker.deleteLater)
-        self._thread.finished.connect(self._cleanup_thread)
-        self._thread.start()
+        thread.started.connect(worker.do_remove)
+        worker.progress.connect(self.progress)
+        worker.finished.connect(partial(self._on_worker_finished, diag))
+        worker.error.connect(partial(self._on_worker_error, diag))
+        thread.finished.connect(partial(self._on_thread_finished, diag))
+
+        thread.start()
+        self._log(logging.INFO, "rmbg.job.started", diag, src=src_path, engine=engine)
+        return diag
 
     @pyqtSlot(dict)
-    def _on_worker_finished(self, payload: dict):
+    def _on_worker_finished(self, diag: str, payload: dict):
+        self._log(logging.INFO, "rmbg.job.finished", diag, kind=payload.get("kind"))
         self.finished.emit(payload)
-        if self._thread is not None:
-            self._thread.quit()
+        self._shutdown_job(diag)
 
     @pyqtSlot(object)
-    def _on_worker_error(self, exc):
+    def _on_worker_error(self, diag: str, exc):
+        self._log(logging.ERROR, "rmbg.job.error", diag, error=repr(exc))
         self.error.emit(exc)
-        if self._thread is not None:
-            self._thread.quit()
+        self._shutdown_job(diag)
 
-    def _cleanup_thread(self):
-        if self._thread is not None:
-            try:
-                self._thread.deleteLater()
-            except Exception:
-                pass
-        self._thread = None
-        self._worker = None
+    def _on_thread_finished(self, diag: str):
+        self._log(logging.DEBUG, "rmbg.job.thread_finished", diag)
+        self._shutdown_job(diag, skip_wait=True)
 
-    def cancel_current(self):
+    def _shutdown_job(self, diag: str, *, skip_wait: bool = False) -> None:
+        ctx = self._jobs.pop(diag, None)
+        if not ctx:
+            return
+        thread = ctx.thread
+        worker = ctx.worker
         try:
-            if self._worker is not None:
-                self._worker.request_cancel()
+            if not skip_wait and thread.isRunning():
+                thread.quit()
+                if not thread.wait(5000):
+                    self._log(logging.WARNING, "rmbg.job.wait_timeout", diag)
+        except Exception as exc:
+            self._log(logging.WARNING, "rmbg.job.wait_error", diag, error=repr(exc))
+        try:
+            worker.deleteLater()
         except Exception:
             pass
+        try:
+            if thread.isRunning() and skip_wait:
+                thread.quit()
+                thread.wait(5000)
+        except Exception as exc:
+            self._log(logging.WARNING, "rmbg.job.quit_error", diag, error=repr(exc))
+        try:
+            thread.deleteLater()
+        except Exception:
+            pass
+
+    def cancel_current(self, diagnostic_id: Optional[str] = None):
+        targets = [diagnostic_id] if diagnostic_id else list(self._jobs.keys())
+        for diag in targets:
+            ctx = self._jobs.get(diag)
+            if not ctx:
+                continue
+            try:
+                ctx.worker.request_cancel()
+            except Exception:
+                pass
+            self._log(logging.INFO, "rmbg.job.cancel_requested", diag)
+            self._shutdown_job(diag)
+
+    def _log(
+        self, level: int, event: str, diag: Optional[str], **fields: object
+    ) -> None:
+        log_structured(self.logger, level, diag, event, **fields)
+
 
 class _RmbgWorker(QObject):
     progress = pyqtSignal(dict)
     finished = pyqtSignal(dict)
     error = pyqtSignal(object)
 
-    def __init__(self, src_path: str, out_dir: str, prefer: str, engine: str, logger: Logger,
-                 hsv_cfg: dict, wand_cfg: dict, image_format: str, anim_format: str,
-                 range_ms: tuple[int | None, int | None] | None = None,
-                 export_opts: dict | None = None,
-                 diagnostic_id: Optional[str] = None):
+    def __init__(
+        self,
+        src_path: str,
+        out_dir: str,
+        prefer: str,
+        engine: str,
+        logger: Logger,
+        hsv_cfg: dict,
+        wand_cfg: dict,
+        image_format: str,
+        anim_format: str,
+        range_ms: tuple[int | None, int | None] | None = None,
+        export_opts: dict | None = None,
+        diagnostic_id: Optional[str] = None,
+    ):
         super().__init__()
         self.src_path = src_path
         self.out_dir = out_dir
@@ -399,22 +494,38 @@ class _RmbgWorker(QObject):
             self.hsv_opts.tol_h = int(hsv_cfg.get("tol_h", self.hsv_opts.tol_h))
             self.hsv_opts.tol_s = int(hsv_cfg.get("tol_s", self.hsv_opts.tol_s))
             self.hsv_opts.tol_v = int(hsv_cfg.get("tol_v", self.hsv_opts.tol_v))
-            self.hsv_opts.strength = float(hsv_cfg.get("strength", self.hsv_opts.strength))
-            self.hsv_opts.erode_iter = int(hsv_cfg.get("erode_iter", self.hsv_opts.erode_iter))
-            self.hsv_opts.dilate_iter = int(hsv_cfg.get("dilate_iter", self.hsv_opts.dilate_iter))
-            self.hsv_opts.feather_px = float(hsv_cfg.get("feather_px", self.hsv_opts.feather_px))
-            self.hsv_opts.use_guided = bool(hsv_cfg.get("use_guided", self.hsv_opts.use_guided))
+            self.hsv_opts.strength = float(
+                hsv_cfg.get("strength", self.hsv_opts.strength)
+            )
+            self.hsv_opts.erode_iter = int(
+                hsv_cfg.get("erode_iter", self.hsv_opts.erode_iter)
+            )
+            self.hsv_opts.dilate_iter = int(
+                hsv_cfg.get("dilate_iter", self.hsv_opts.dilate_iter)
+            )
+            self.hsv_opts.feather_px = float(
+                hsv_cfg.get("feather_px", self.hsv_opts.feather_px)
+            )
+            self.hsv_opts.use_guided = bool(
+                hsv_cfg.get("use_guided", self.hsv_opts.use_guided)
+            )
         except Exception as e:
             self._log(logging.WARNING, f"worker.hsv_config.invalid: {e}")
         # 魔術棒參數
         self.wand_opts = wand_cfg or {}
         self.wand_seed = None
-        if isinstance(self.wand_opts.get("seed", None), (tuple, list)) and len(self.wand_opts["seed"]) == 2:
-            self.wand_seed = (int(self.wand_opts["seed"][0]), int(self.wand_opts["seed"][1]))
+        if (
+            isinstance(self.wand_opts.get("seed", None), (tuple, list))
+            and len(self.wand_opts["seed"]) == 2
+        ):
+            self.wand_seed = (
+                int(self.wand_opts["seed"][0]),
+                int(self.wand_opts["seed"][1]),
+            )
         # 輸出格式
-        self.image_format = (image_format or 'webp').lower()
+        self.image_format = (image_format or "webp").lower()
         # 規格：影片/動圖輸出強制 animated-webp
-        self.anim_format = 'webp'
+        self.anim_format = "webp"
         self.fps = 0
         self.range_ms = range_ms or (None, None)
         # 匯出參數（當次優先）
@@ -444,13 +555,25 @@ class _RmbgWorker(QObject):
             remove_wand=self._remove_image_magicwand,
             passthrough=self._load_rgba_direct,
         )
-        self.image_pipeline = ImagePipeline(self.input_router, self.encoder_service, self.logger)
-        self.video_pipeline = VideoPipeline(self.input_router, self.encoder_service, self.logger)
+        self.image_pipeline = ImagePipeline(
+            self.input_router, self.encoder_service, self.logger
+        )
+        self.video_pipeline = VideoPipeline(
+            self.input_router, self.encoder_service, self.logger
+        )
 
         self.hsv_opts.strength = 1.5
-        self._cancel_requested = False  # OpenSpec: add-processing-queue — cancel current job
+        self._cancel_requested = (
+            False  # OpenSpec: add-processing-queue — cancel current job
+        )
         # spec: openspec/changes/add-processing-queue/tasks.md:1
-        self._log(logging.INFO, "worker.initialised", src=self.src_path, engine=self.engine, prefer=self.prefer)
+        self._log(
+            logging.INFO,
+            "worker.initialised",
+            src=self.src_path,
+            engine=self.engine,
+            prefer=self.prefer,
+        )
 
     def request_cancel(self):
         self._cancel_requested = True
@@ -485,13 +608,17 @@ class _RmbgWorker(QObject):
             )
 
             def progress_cb(value: int, status: str) -> None:
-                self._log(logging.DEBUG, "worker.progress", value=int(value), status=status)
-                self.progress.emit({
-                    "signalId": "rmbg",
-                    "value": int(value),
-                    "status": status,
-                    "diagnostic_id": self.diagnostic_id,
-                })
+                self._log(
+                    logging.DEBUG, "worker.progress", value=int(value), status=status
+                )
+                self.progress.emit(
+                    {
+                        "signalId": "rmbg",
+                        "value": int(value),
+                        "status": status,
+                        "diagnostic_id": self.diagnostic_id,
+                    }
+                )
 
             ext = os.path.splitext(self.src_path)[1].lower()
             wand_opts = dict(self.wand_opts) if isinstance(self.wand_opts, dict) else {}
@@ -503,7 +630,13 @@ class _RmbgWorker(QObject):
                 range=self.range_ms,
                 direct_copy=self.export_direct_copy,
                 profile=self.export_profile,
+                engine=self.engine,
             )
+
+            if self.engine in ("none", "copy"):
+                payload = self._run_passthrough_flow(export_options, progress_cb)
+                self.finished.emit(payload)
+                return
 
             if ext in RmbgThread.IMAGE_EXTS and ext not in RmbgThread.ANIM_EXTS:
                 progress_cb(5, f"processing ({self.engine})")
@@ -517,12 +650,14 @@ class _RmbgWorker(QObject):
                     progress_cb=progress_cb,
                 )
                 self._log(logging.INFO, "worker.image.completed", output=out)
-                self.finished.emit({
-                    "input": self.src_path,
-                    "output": out,
-                    "kind": "image",
-                    "diagnostic_id": self.diagnostic_id,
-                })
+                self.finished.emit(
+                    {
+                        "input": self.src_path,
+                        "output": out,
+                        "kind": "image",
+                        "diagnostic_id": self.diagnostic_id,
+                    }
+                )
                 return
 
             if ext in RmbgThread.ANIM_EXTS or ext in RmbgThread.VIDEO_EXTS:
@@ -539,7 +674,13 @@ class _RmbgWorker(QObject):
                 )
                 self.fps = payload.get("fps", 0)
                 payload["diagnostic_id"] = self.diagnostic_id
-                self._log(logging.INFO, "worker.video.completed", output=payload.get("output"), frames=payload.get("frames"), fps=self.fps)
+                self._log(
+                    logging.INFO,
+                    "worker.video.completed",
+                    output=payload.get("output"),
+                    frames=payload.get("frames"),
+                    fps=self.fps,
+                )
                 self.finished.emit(payload)
                 return
 
@@ -554,12 +695,14 @@ class _RmbgWorker(QObject):
                 progress_cb=progress_cb,
             )
             self._log(logging.INFO, "worker.image.completed", output=out)
-            self.finished.emit({
-                "input": self.src_path,
-                "output": out,
-                "kind": "image",
-                "diagnostic_id": self.diagnostic_id,
-            })
+            self.finished.emit(
+                {
+                    "input": self.src_path,
+                    "output": out,
+                    "kind": "image",
+                    "diagnostic_id": self.diagnostic_id,
+                }
+            )
         except Exception as e:
             exc = attach_diagnostic(e, self.diagnostic_id)
             self._log(logging.ERROR, "worker.error", error=repr(exc))
@@ -573,13 +716,91 @@ class _RmbgWorker(QObject):
     def _load_rgba_direct(self, src: str) -> np.ndarray:
         return np.array(Image.open(src).convert("RGBA"))
 
-# ========== 三種引擎 ==========
+    def _run_passthrough_flow(
+        self,
+        options: ExportRuntimeOptions,
+        progress_cb: Callable[[int, str], None],
+    ) -> Dict[str, object]:
+        ext = os.path.splitext(self.src_path)[1].lower()
+        if ext in RmbgThread.IMAGE_EXTS and ext not in RmbgThread.ANIM_EXTS:
+            target = self._run_passthrough_image(options, progress_cb)
+            return {
+                "input": self.src_path,
+                "output": target,
+                "kind": "image",
+                "diagnostic_id": self.diagnostic_id,
+            }
+
+        progress_cb(5, "prepare(copy)")
+        if (
+            options.direct_copy
+            and options.target_path
+            and all(ms in (None, 0) for ms in self.range_ms)
+        ):
+            target = self.encoder_service.copy(
+                self.src_path, options.target_path, options
+            )
+            progress_cb(100, "done(copy)")
+            return {
+                "input": self.src_path,
+                "output": target,
+                "kind": "anim",
+                "frames": None,
+                "fps": None,
+                "diagnostic_id": self.diagnostic_id,
+            }
+
+        self._log(
+            logging.INFO,
+            "worker.video.passthrough.convert",
+            target_profile=options.profile,
+        )
+        payload = self.video_pipeline.run(
+            self.src_path,
+            self.out_dir,
+            self.engine,
+            options,
+            wand_seed=self.wand_seed,
+            wand_opts=self.wand_opts,
+            range_ms=self.range_ms,
+            progress_cb=progress_cb,
+        )
+        payload["diagnostic_id"] = self.diagnostic_id
+        return payload
+
+    def _run_passthrough_image(
+        self,
+        options: ExportRuntimeOptions,
+        progress_cb: Callable[[int, str], None],
+    ) -> str:
+        progress_cb(5, "prepare(copy)")
+        if options.direct_copy and options.target_path:
+            target = self.encoder_service.copy(
+                self.src_path, options.target_path, options
+            )
+            progress_cb(100, "done(copy)")
+            return target
+
+        target = self.encoder_service.resolve_image_target(
+            self.src_path, self.out_dir, options
+        )
+        rgba = self._load_rgba_direct(self.src_path)
+        if target.lower().endswith(".webp"):
+            self.encoder_service.encode_webp(rgba, target, options)
+        else:
+            self.encoder_service.encode_image(rgba, target, options)
+        progress_cb(100, "done")
+        return target
+
+    # ========== 三種引擎 ==========
     def _remove_image_rembg(self, src: str) -> np.ndarray:
         try:
             from rembg import remove, new_session  # type: ignore
         except Exception as e:
             raise RuntimeError("rembg 未安裝，請先 `pip install rembg`。") from e
-        sess = new_session("u2net")  # 你可改 isnet-general / birefnet-general / isnet-anime 等
+        sess = new_session(
+            "u2net"
+        )  # 你可改 isnet-general / birefnet-general / isnet-anime 等
         with open(src, "rb") as f:
             data = f.read()
         out_bytes = remove(data, session=sess)
@@ -594,7 +815,9 @@ class _RmbgWorker(QObject):
             if os.path.exists("./models/model.onnx"):
                 model_path = "./models/model.onnx"
             else:
-                raise FFmpegNotFoundError("未找到 RMBG 模型。請設定環境變數 RMBG_MODEL_PATH 指向 RMBG-1.4.onnx 或 IR .xml。")
+                raise FFmpegNotFoundError(
+                    "未找到 RMBG 模型。請設定環境變數 RMBG_MODEL_PATH 指向 RMBG-1.4.onnx 或 IR .xml。"
+                )
         try:
             from openvino.runtime import Core
         except Exception as e:
@@ -605,7 +828,6 @@ class _RmbgWorker(QObject):
         return self._ov_compiled
 
     def _remove_image_openvino(self, src: str) -> np.ndarray:
-        
         compiled = self._load_ov_model()
         im = Image.open(src).convert("RGB")
         rgb = np.array(im)  # HWC uint8
@@ -613,7 +835,9 @@ class _RmbgWorker(QObject):
 
         # 依常見 RMBG 入口尺寸（多為 1024）
         inp_size = 1024
-        img_resized = cv2.resize(rgb, (inp_size, inp_size), interpolation=cv2.INTER_AREA)
+        img_resized = cv2.resize(
+            rgb, (inp_size, inp_size), interpolation=cv2.INTER_AREA
+        )
         x = img_resized.astype(np.float32) / 255.0
         x = np.transpose(x, (2, 0, 1))[None, ...]  # NCHW
 
@@ -628,9 +852,11 @@ class _RmbgWorker(QObject):
         rgba = np.dstack([rgb, alpha])
         return rgba
 
-    def _estimate_bg_hsv_range(self, bgr: np.ndarray, pad=10, tol_h=10, tol_s=60, tol_v=60) -> Tuple[np.ndarray, np.ndarray]:
-       
+    def _estimate_bg_hsv_range(
+        self, bgr: np.ndarray, pad=10, tol_h=10, tol_s=60, tol_v=60
+    ) -> Tuple[np.ndarray, np.ndarray]:
         import cv2
+
         # 標準化為 3 通道 BGR
         if bgr.ndim == 2:
             bgr = cv2.cvtColor(bgr, cv2.COLOR_GRAY2BGR)
@@ -640,10 +866,10 @@ class _RmbgWorker(QObject):
         H, W = bgr.shape[:2]
         p = max(1, min(pad, H // 2 if H > 1 else 1, W // 2 if W > 1 else 1))
 
-        top    = bgr[:p, :, :].reshape(-1, 3)
+        top = bgr[:p, :, :].reshape(-1, 3)
         bottom = bgr[-p:, :, :].reshape(-1, 3)
-        left   = bgr[:, :p, :].reshape(-1, 3)
-        right  = bgr[:, -p:, :].reshape(-1, 3)
+        left = bgr[:, :p, :].reshape(-1, 3)
+        right = bgr[:, -p:, :].reshape(-1, 3)
         border = np.concatenate([top, bottom, left, right], axis=0)
         if border.size == 0:
             border = bgr.reshape(-1, 3)
@@ -658,12 +884,15 @@ class _RmbgWorker(QObject):
         ts = int(round(tol_s * k))
         tv = int(round(tol_v * k))
 
-        low  = np.array([max(0,   h - th), max(0,   s - ts), max(0,   v - tv)], dtype=np.uint8)
-        high = np.array([min(179, h + th), min(255, s + ts), min(255, v + tv)], dtype=np.uint8)
+        low = np.array([max(0, h - th), max(0, s - ts), max(0, v - tv)], dtype=np.uint8)
+        high = np.array(
+            [min(179, h + th), min(255, s + ts), min(255, v + tv)], dtype=np.uint8
+        )
         return low, high
 
     def _remove_image_hsv(self, src: str) -> np.ndarray:
         import cv2
+
         bgr = cv2.imread(src, cv2.IMREAD_UNCHANGED)
         if bgr is None:
             raise RuntimeError("讀圖失敗")
@@ -674,11 +903,14 @@ class _RmbgWorker(QObject):
             bgr = bgr[:, :, :3]
 
         # HSV inRange（放寬門檻）
-        low, high = self._estimate_bg_hsv_range(bgr, tol_h=self.hsv_opts.tol_h,
-                                                tol_s=self.hsv_opts.tol_s,
-                                                tol_v=self.hsv_opts.tol_v)
+        low, high = self._estimate_bg_hsv_range(
+            bgr,
+            tol_h=self.hsv_opts.tol_h,
+            tol_s=self.hsv_opts.tol_s,
+            tol_v=self.hsv_opts.tol_v,
+        )
         hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-        bg = cv2.inRange(hsv, low, high)               # 背景=255
+        bg = cv2.inRange(hsv, low, high)  # 背景=255
 
         # 強化：先膨脹背景再侵蝕前景，吃掉亮白邊
         if self.hsv_opts.dilate_iter > 0:
@@ -689,7 +921,7 @@ class _RmbgWorker(QObject):
             bg = cv2.erode(bg, k, iterations=self.hsv_opts.erode_iter)
 
         # 生成前景二值與距離羽化 alpha
-        fg_bin = cv2.bitwise_not(bg)                   # 前景=255
+        fg_bin = cv2.bitwise_not(bg)  # 前景=255
         if self.hsv_opts.feather_px > 0:
             # 距離轉換 -> 線性羽化到指定像素
             dist = cv2.distanceTransform(fg_bin, cv2.DIST_L2, 3)
@@ -702,18 +934,21 @@ class _RmbgWorker(QObject):
         if self.hsv_opts.use_guided:
             try:
                 import cv2.ximgproc as xip
+
                 guide = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
                 alpha = xip.guidedFilter(guide, alpha, radius=4, eps=1e-3)
             except Exception:
                 pass
 
-        rgba = np.dstack([bgr[..., ::-1], alpha])      # BGR->RGB + alpha
+        rgba = np.dstack([bgr[..., ::-1], alpha])  # BGR->RGB + alpha
         return rgba
 
-
     # --- 修改: 去背，接受 seed_xy；None 則退回四角 ---
-    def _remove_image_magicwand(self, src: str, seed_xy: tuple[int,int], opts: Optional[dict] = None) -> np.ndarray:
+    def _remove_image_magicwand(
+        self, src: str, seed_xy: tuple[int, int], opts: Optional[dict] = None
+    ) -> np.ndarray:
         from core.wand import compute_mask
+
         bgr = cv2.imread(src, cv2.IMREAD_COLOR)
         if bgr is None:
             raise RuntimeError("讀圖失敗")
@@ -721,5 +956,3 @@ class _RmbgWorker(QObject):
         rgb = bgr[..., ::-1]
         rgba = np.dstack([rgb, mask])
         return rgba
-
-    
