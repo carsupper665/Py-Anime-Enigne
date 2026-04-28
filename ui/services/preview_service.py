@@ -180,7 +180,9 @@ class PreviewService:
             raise RuntimeError("Preview source not prepared")
         frame = self._get_frame(self._state.current_frame)
         if frame is None:
-            raise RuntimeError("讀取影格失敗")
+            raise RuntimeError(
+                f"讀取影格失敗 (frame={self._state.current_frame})"
+            )
         overlay = self._compute_overlay(frame) if apply_hsv else None
         return self._to_preview_frame(frame, overlay)
 
@@ -196,7 +198,9 @@ class PreviewService:
             raise RuntimeError("Preview source not prepared")
         frame = self._get_frame(self._state.current_frame)
         if frame is None:
-            raise RuntimeError("讀取影格失敗")
+            raise RuntimeError(
+                f"讀取影格失敗 (frame={self._state.current_frame})"
+            )
         overlay = (
             self._compute_overlay_for_engine(
                 frame, engine, wand_seed=wand_seed, wand_opts=wand_opts
@@ -287,7 +291,7 @@ class PreviewService:
         wand_opts: Optional[Dict[str, Any]],
     ) -> Optional[QImage]:
         if not wand_seed:
-            raise RuntimeError("魔術棒需要先在圖片上取樣（點擊）座標。")
+            raise RuntimeError("魔術棒需要先在圖片上取樣（wand_seed 為空）。")
         try:
             from core.wand import compute_mask
         except Exception:
