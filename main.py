@@ -29,6 +29,7 @@ from core.diagnostics import (
     generate_diagnostic_id,
     log_structured,
 )
+from ui.services.queue_coordinator import QueueCoordinator
 import os
 
 
@@ -54,7 +55,7 @@ class Main(QMainWindow):
         self.toast = Toast(self)
         self.toast_loading = LoadingToast(self)
         self.toast.fatalTriggered.connect(self._clear_all)
-        self._suppress_rmbg_loading = False
+        self.queue_coordinator: QueueCoordinator | None = None
 
         try:
             self.main_widget = QWidget()
@@ -101,19 +102,22 @@ class Main(QMainWindow):
         if hasattr(self.home_page, "enqueueJob"):
             self.home_page.enqueueJob.connect(self._on_enqueue_job)
         # 佇列開始某個工作 → 顯示 Loading 並呼叫既有去背流程
-        self._queue_started_count = 0
-        self.queue.job_started.connect(self._on_queue_job_started)
+        self.queue_coordinator = QueueCoordinator(
+            logger=self.logger,
+            toast_loading=self.toast_loading,
+            home_page=self.home_page,
+            run_job=self._run_queue_job,
+        )
+        self.queue.job_started.connect(self.queue_coordinator.on_job_started)
         # 將 worker 訊號轉發給佇列（以便 UI 顯示）
         self.rmbg_thread.progress.connect(self.queue.notify_progress)
         self.rmbg_thread.finished.connect(self.queue.notify_finished)
         self.rmbg_thread.error.connect(self.queue.notify_error)
         # 佇列計數與狀態顯示
-        self._queue_pending = 0
-        self.queue.job_enqueued.connect(lambda _j: self._update_queue_ui(delta=1))
-        self.queue.job_finished.connect(lambda _j, _p: self._update_queue_ui(delta=-1))
-        self.queue.job_error.connect(lambda _j, _e: self._update_queue_ui(delta=-1))
-        self.queue.queue_empty.connect(lambda: self._set_queue_label(0))
-        self.queue.queue_empty.connect(self._on_queue_empty)
+        self.queue.job_enqueued.connect(self.queue_coordinator.on_job_enqueued)
+        self.queue.job_finished.connect(self.queue_coordinator.on_job_finished)
+        self.queue.job_error.connect(self.queue_coordinator.on_job_error)
+        self.queue.queue_empty.connect(self.queue_coordinator.on_queue_empty)
         # 任務完成/錯誤時保險關閉 Loading（通常 100% 會自動關閉）
         self.queue.job_finished.connect(
             lambda *_: self.toast_loading.on_exception_cancel()
@@ -124,9 +128,8 @@ class Main(QMainWindow):
 
     @pyqtSlot(str, str, dict)  # (src_path: str, prefer: str = "auto", opts: dict):
     def _on_rmbg(self, src: str, prefer: str, opts: dict):
-        if getattr(self, "_suppress_rmbg_loading", False):
-            # 僅抑制一次，避免重覆顯示
-            self._suppress_rmbg_loading = False
+        if self.queue_coordinator and self.queue_coordinator.consume_loading_suppression():
+            pass
         else:
             self.toast_loading.show_loading(title="Removeing BG")
         payload_opts = dict(opts or {})
@@ -167,42 +170,11 @@ class Main(QMainWindow):
 
     # ----- Queue + LoadingToast integration -----
     @pyqtSlot(object)
-    def _on_queue_job_started(self, job):
+    def _run_queue_job(self, job):
         try:
-            # i/N：以「目前待處理 + 1」作為 N；i 以批次計數累加
-            self._queue_started_count = getattr(self, "_queue_started_count", 0) + 1
-            total = max(1, getattr(self, "_queue_pending", 0) + 1)
-            title = f"Processing {self._queue_started_count}/{total}"
-            msg = os.path.basename(getattr(job, "src", ""))
-            diagnostic_id = getattr(job, "diagnostic_id", None)
-            if not diagnostic_id and isinstance(getattr(job, "opts", None), dict):
-                diagnostic_id = job.opts.get("diagnostic_id")
-            if diagnostic_id:
-                msg = f"{msg} (ID {diagnostic_id})"
-            log_structured(
-                self.logger,
-                logging.INFO,
-                diagnostic_id,
-                "queue.job.started",
-                src=getattr(job, "src", ""),
-                prefer=getattr(job, "prefer", ""),
-            )
-            # 抑制 _on_rmbg 再次顯示 loading
-            self._suppress_rmbg_loading = True
-            self.toast_loading.show_loading(title=title, message=msg)
-            # 開始執行
             self._on_rmbg(job.src, job.prefer, job.opts)
         except Exception as e:
             self._on_exception(e)
-
-    @pyqtSlot()
-    def _on_queue_empty(self):
-        try:
-            self._queue_started_count = 0
-            # 確保 Loading 關閉
-            self.toast_loading.on_exception_cancel()
-        except Exception:
-            pass
 
     @pyqtSlot(dict)  # {input, output, kind, frames?, manifest?}
     def _rmbg_finished(self, payload: dict):
@@ -469,19 +441,6 @@ class Main(QMainWindow):
     def _on_enqueue_job_via_removebg(self, src: str, prefer: str, opts: dict):
         # OpenSpec: update-queue-nonblocking-integration — redirect direct removeBg to queue
         self._on_enqueue_job(src, prefer, opts)
-
-    def _set_queue_label(self, n: int):
-        self._queue_pending = max(0, n)
-        try:
-            if hasattr(self.home_page, "queue_label"):
-                self.home_page.queue_label.setText(
-                    f"Queue: {self._queue_pending} pending"
-                )
-        except Exception:
-            pass
-
-    def _update_queue_ui(self, delta: int = 0):
-        self._set_queue_label(self._queue_pending + delta)
 
     @pyqtSlot(Exception)
     def _on_exception(self, e: Exception):

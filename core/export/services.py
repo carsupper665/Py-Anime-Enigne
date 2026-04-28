@@ -256,6 +256,10 @@ class VideoExportService:
         self._log("command.run.trim", diagnostic_id, success=ok, command=args)
         return CommandResult(success=ok, log=log)
 
+    def suggest_output_name(self, src: str, suffix: str) -> str:
+        base = os.path.splitext(os.path.basename(src or "output"))[0]
+        return f"{base}{suffix}"
+
     def mute(
         self,
         src: str,

@@ -54,6 +54,7 @@ from ui.services.rmbg_pipeline import (
     VideoPipeline,
     EncoderService,
     ExportRuntimeOptions,
+    build_export_runtime_options,
 )
 
 
@@ -528,24 +529,12 @@ class _RmbgWorker(QObject):
         self.anim_format = "webp"
         self.fps = 0
         self.range_ms = range_ms or (None, None)
-        # 匯出參數（當次優先）
-        try:
-            eo = export_opts or {}
-            self.export_quality = int(eo.get("quality", 75))
-            self.export_max_fps = int(eo.get("max_fps", 0))
-            self.export_loop = bool(eo.get("loop", True))
-            self.export_target_path = eo.get("target_path")
-            self.export_direct_copy = bool(eo.get("direct_copy", False))
-            self.export_profile = str(eo.get("profile", image_format)).lower()
-        except Exception:
-            self.export_quality, self.export_max_fps, self.export_loop = 75, 0, True
-            self.export_target_path = None
-            self.export_direct_copy = False
-            self.export_profile = (image_format or "webp").lower()
-        if isinstance(self.export_target_path, str):
-            ext = os.path.splitext(self.export_target_path)[1].lower()
-            if ext:
-                self.export_profile = ext.lstrip(".") or self.export_profile
+        self.export_options = build_export_runtime_options(
+            image_format=self.image_format,
+            anim_format=self.anim_format,
+            export_opts=export_opts,
+            diagnostic_id=self.diagnostic_id,
+        )
         # strength=1.5、erode_iter=1、feather_px=2.0
         self.encoder_service = EncoderService(self.logger)
         self.input_router = InputRouterService(
@@ -595,17 +584,7 @@ class _RmbgWorker(QObject):
                 raise FileNotFoundError(self.src_path)
             os.makedirs(self.out_dir, exist_ok=True)
 
-            export_options = ExportRuntimeOptions(
-                image_format=self.image_format,
-                anim_format=self.anim_format,
-                quality=self.export_quality,
-                max_fps=self.export_max_fps,
-                loop=self.export_loop,
-                target_path=self.export_target_path,
-                direct_copy=self.export_direct_copy,
-                profile=self.export_profile,
-                diagnostic_id=self.diagnostic_id,
-            )
+            export_options = self.export_options
 
             def progress_cb(value: int, status: str) -> None:
                 self._log(
@@ -628,8 +607,8 @@ class _RmbgWorker(QObject):
                 "worker.run.start",
                 ext=ext,
                 range=self.range_ms,
-                direct_copy=self.export_direct_copy,
-                profile=self.export_profile,
+                direct_copy=export_options.direct_copy,
+                profile=export_options.profile,
                 engine=self.engine,
             )
 

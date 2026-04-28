@@ -34,6 +34,45 @@ class ExportRuntimeOptions:
     diagnostic_id: Optional[str] = None
 
 
+def build_export_runtime_options(
+    *,
+    image_format: str,
+    anim_format: str,
+    export_opts: Optional[Dict[str, Any]] = None,
+    diagnostic_id: Optional[str] = None,
+) -> ExportRuntimeOptions:
+    try:
+        eo = export_opts or {}
+        quality = int(eo.get("quality", 75))
+        max_fps = int(eo.get("max_fps", 0))
+        loop = bool(eo.get("loop", True))
+        target_path = eo.get("target_path")
+        direct_copy = bool(eo.get("direct_copy", False))
+        profile = str(eo.get("profile", image_format)).lower()
+    except Exception:
+        quality, max_fps, loop = 75, 0, True
+        target_path = None
+        direct_copy = False
+        profile = image_format
+
+    if isinstance(target_path, str):
+        ext = os.path.splitext(target_path)[1].lower()
+        if ext:
+            profile = ext.lstrip(".") or profile
+
+    return ExportRuntimeOptions(
+        image_format=image_format,
+        anim_format=anim_format,
+        quality=quality,
+        max_fps=max_fps,
+        loop=loop,
+        target_path=target_path,
+        direct_copy=direct_copy,
+        profile=profile,
+        diagnostic_id=diagnostic_id,
+    )
+
+
 def clamp_fps(source_fps: int, max_fps: int) -> int:
     if source_fps <= 0:
         source_fps = 1

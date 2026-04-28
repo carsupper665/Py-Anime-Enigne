@@ -37,6 +37,7 @@ class PreviewState:
             "erode_iter": 1,
             "dilate_iter": 0,
             "feather_px": 2.0,
+            "use_guided": 0.0,
         }
     )
     seed: Optional[Tuple[int, int]] = None
@@ -183,6 +184,28 @@ class PreviewService:
         overlay = self._compute_overlay(frame) if apply_hsv else None
         return self._to_preview_frame(frame, overlay)
 
+    def load_current_frame_with_engine(
+        self,
+        *,
+        engine: str,
+        wand_seed: Optional[Tuple[int, int]] = None,
+        wand_opts: Optional[Dict[str, Any]] = None,
+        apply_overlay: bool = True,
+    ) -> PreviewFrame:
+        if not self._source:
+            raise RuntimeError("Preview source not prepared")
+        frame = self._get_frame(self._state.current_frame)
+        if frame is None:
+            raise RuntimeError("讀取影格失敗")
+        overlay = (
+            self._compute_overlay_for_engine(
+                frame, engine, wand_seed=wand_seed, wand_opts=wand_opts
+            )
+            if apply_overlay
+            else None
+        )
+        return self._to_preview_frame(frame, overlay)
+
     # --- Internal helpers ---
     def _normalize_frame(self, frame: np.ndarray) -> np.ndarray:
         if frame.ndim == 2:
@@ -220,9 +243,58 @@ class PreviewService:
             "erode_iter": int(self._state.hsv["erode_iter"]),
             "dilate_iter": int(self._state.hsv["dilate_iter"]),
             "feather_px": float(self._state.hsv["feather_px"]),
+            "use_guided": bool(self._state.hsv.get("use_guided", 0.0)),
         }
         try:
             alpha = compute_alpha(bgr.copy(), opts)
+        except Exception:
+            return None
+        h, w = alpha.shape[:2]
+        overlay_arr = np.zeros((h, w, 4), dtype=np.uint8)
+        overlay_arr[..., 1] = 255
+        overlay_arr[..., 3] = (alpha > 0).astype(np.uint8) * 90
+        overlay_arr = np.ascontiguousarray(overlay_arr)
+        return QImage(
+            overlay_arr.tobytes(),
+            w,
+            h,
+            overlay_arr.strides[0],
+            QImage.Format.Format_RGBA8888,
+        ).copy()
+
+    def _compute_overlay_for_engine(
+        self,
+        bgr: np.ndarray,
+        engine: str,
+        *,
+        wand_seed: Optional[Tuple[int, int]],
+        wand_opts: Optional[Dict[str, Any]],
+    ) -> Optional[QImage]:
+        engine = (engine or "hsv").lower()
+        if engine == "hsv":
+            return self._compute_overlay(bgr)
+        if engine == "wand":
+            return self._compute_wand_overlay(
+                bgr, wand_seed=wand_seed, wand_opts=wand_opts
+            )
+        return None
+
+    def _compute_wand_overlay(
+        self,
+        bgr: np.ndarray,
+        *,
+        wand_seed: Optional[Tuple[int, int]],
+        wand_opts: Optional[Dict[str, Any]],
+    ) -> Optional[QImage]:
+        if not wand_seed:
+            raise RuntimeError("魔術棒需要先在圖片上取樣（點擊）座標。")
+        try:
+            from core.wand import compute_mask
+        except Exception:
+            return None
+        opts = dict(wand_opts or {})
+        try:
+            alpha = compute_mask(bgr.copy(), wand_seed, opts)
         except Exception:
             return None
         h, w = alpha.shape[:2]
