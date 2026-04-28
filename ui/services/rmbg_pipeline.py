@@ -53,7 +53,7 @@ def build_export_runtime_options(
         quality, max_fps, loop = 75, 0, True
         target_path = None
         direct_copy = False
-        profile = image_format
+        profile = str(image_format).lower()
 
     if isinstance(target_path, str):
         ext = os.path.splitext(target_path)[1].lower()

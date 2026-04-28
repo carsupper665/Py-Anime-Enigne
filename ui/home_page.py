@@ -1168,7 +1168,9 @@ class HomePage(QWidget):
             # 以原圖為底，避免覆疊多次後失真或透明
             base = getattr(self, "_orig_pix", None)
             if base is None or base.isNull():
-                base = QPixmap.fromImage(frame.image)
+                base = QPixmap(self._current_path)
+                if base.isNull():
+                    base = QPixmap.fromImage(frame.image)
                 if base.isNull():
                     return
                 self._orig_pix = QPixmap(base)
