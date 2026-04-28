@@ -1150,7 +1150,7 @@ class HomePage(QWidget):
             self._preview_service.update_hsv("dilate_iter", int(self.s_dilate.value()))
             self._preview_service.update_hsv("feather_px", float(self.s_feather.value()))
             self._preview_service.update_hsv(
-                "use_guided", float(bool(self.cb_guided.isChecked()))
+                "use_guided", bool(self.cb_guided.isChecked())
             )
 
             frame = self._preview_service.load_current_frame_with_engine(

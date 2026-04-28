@@ -37,7 +37,7 @@ class PreviewState:
             "erode_iter": 1,
             "dilate_iter": 0,
             "feather_px": 2.0,
-            "use_guided": 0.0,
+            "use_guided": False,
         }
     )
     seed: Optional[Tuple[int, int]] = None
