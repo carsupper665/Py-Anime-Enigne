@@ -1,5 +1,4 @@
 # ui/home_page.py
-from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple
 
 from PyQt6.QtWidgets import (
@@ -34,13 +33,17 @@ except Exception:
     _MULTIMEDIA_AVAILABLE = False
 import logging
 import os, shutil, subprocess
+from core.config import save_config
 from core.export_context import ExportOptions, merge_export_settings
+from core.job_models import JobRequest
 from core.export.services import (
     ExportCommandBuilder,
     TempDirectoryManager,
     VideoExportService,
 )
 from core.diagnostics import attach_diagnostic, generate_diagnostic_id, log_structured
+from ui.services.preview_service import PreviewService
+from ui.services.save_controller import SaveDialogResult, SaveExportController, SavePlan
 
 _BTN_STYLE = """
     QPushButton {
@@ -67,25 +70,6 @@ VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
 # 供缺少多媒體相依時提示用
 _ALL_VIDEO_EXTS = set(VIDEO_EXTS)
 _EXTS = ["gif", "webp", "png"]
-
-
-@dataclass
-class SaveDialogResult:
-    filename: str
-    options: ExportOptions
-
-
-@dataclass
-class QueueJobPayload:
-    src: str
-    prefer: str
-    opts: Dict[str, Any]
-    diagnostic_id: str
-
-
-@dataclass
-class SavePlan:
-    queue_job: QueueJobPayload
 
 
 class HomePage(QWidget):
@@ -115,6 +99,21 @@ class HomePage(QWidget):
             logger=self.logger,
         )
         self._last_export_options = ExportOptions()
+        self._preview_service = PreviewService()
+        self._preview_source_path: Optional[str] = None
+        self._save_controller = SaveExportController(
+            logger=self.logger,
+            config_provider=lambda: self.p.config if hasattr(self.p, "config") else {},
+            config_saver=save_config,
+            enqueue_job=self._enqueue_job_request,
+            toast_emitter=self.toast.emit,
+            get_out_dir=self._get_out_dir,
+            confirm_overwrite=self._confirm_overwrite,
+            show_message=self._show_message,
+            can_direct_copy=self._can_direct_copy,
+            build_queue_job=self._build_queue_job,
+            on_options_updated=self._set_last_export_options,
+        )
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -486,6 +485,11 @@ class HomePage(QWidget):
                 # 保留原圖 pixmap 供預覽疊色使用
                 self._orig_pix = QPixmap(pix)
                 self.preview_img.setPixmap(self._scaled(self._orig_pix))
+                try:
+                    self._preview_service.set_static_source(path)
+                    self._preview_source_path = path
+                except Exception:
+                    self._preview_source_path = None
                 # 記錄原始尺寸供座標轉換
                 sz = reader.size()
                 self._last_img_size = (sz.width(), sz.height())
@@ -505,6 +509,11 @@ class HomePage(QWidget):
         # 清除原圖快取
         if hasattr(self, "_orig_pix"):
             self._orig_pix = None
+        self._preview_source_path = None
+        try:
+            self._preview_service.clear_cache()
+        except Exception:
+            pass
 
     # ---------- helpers ----------
     def _is_allowed(self, path: str) -> bool:
@@ -593,84 +602,21 @@ class HomePage(QWidget):
         return SaveDialogResult(filename=name, options=options)
 
     def persist_output_settings(self, options: ExportOptions) -> None:
-        parent = self.p
-        if not parent or not hasattr(parent, "config"):
-            return
-        cfg = parent.config
-        cfg.setdefault("export", {})
-        cfg["export"].setdefault("options", {})
-        cfg["export"]["options"].update(options.to_dict())
-        cfg.setdefault("output", {})
-        cfg["output"]["quality"] = options.quality
-        cfg["output"]["max_fps"] = options.max_fps
-        cfg["output"]["loop"] = options.loop
-        try:
-            from core.config import save_config
-
-            save_config(cfg)
-        except Exception:
-            pass
+        self._save_controller.persist_output_settings(options)
 
     def build_save_plan(self, result: SaveDialogResult) -> Optional[SavePlan]:
-        out_dir = self._get_out_dir()
-        os.makedirs(out_dir, exist_ok=True)
-        save_path = os.path.join(out_dir, result.filename)
-
-        if os.path.abspath(save_path) == os.path.abspath(self._current_path):
-            self._show_message("提示", "來源與目標相同。")
-            return None
-        if not self._confirm_overwrite(save_path):
-            return None
-
-        if self.rem_bg.isChecked():
-            queue_payload = self._build_queue_job(
-                save_path,
-                replace(
-                    result.options,
-                    target_path=None,
-                    direct_copy=False,
-                    profile=result.options.profile,
-                ),
-                prefer_override=None,
-            )
-            if queue_payload:
-                return SavePlan(queue_job=queue_payload)
-            return None
-
-        direct_copy = self._can_direct_copy(save_path)
-        adjusted_options = replace(
-            result.options,
-            target_path=save_path,
-            direct_copy=direct_copy,
-            profile=result.options.profile,
+        return self._save_controller.build_save_plan(
+            self._current_path, result, self.rem_bg.isChecked()
         )
-        self._last_export_options = adjusted_options
-        queue_payload = self._build_queue_job(
-            save_path, adjusted_options, prefer_override="none"
-        )
-        if queue_payload:
-            return SavePlan(queue_job=queue_payload)
-        return None
 
     def run_save_plan(self, plan: SavePlan) -> None:
-        payload = plan.queue_job
-        self.enqueueJob.emit(payload.src, payload.prefer, payload.opts)
-        log_structured(
-            self.logger,
-            logging.INFO,
-            payload.diagnostic_id,
-            "queue.job.enqueued",
-            src=payload.src,
-            prefer=payload.prefer,
-        )
-        self.toast.emit(
-            {
-                "level": "info",
-                "title": "已加入佇列",
-                "message": f"等待處理…（追蹤 {payload.diagnostic_id}）",
-                "duration": 3000,
-            }
-        )
+        self._save_controller.run_save_plan(plan)
+
+    def _enqueue_job_request(self, payload: JobRequest) -> None:
+        self.enqueueJob.emit(*payload.to_payload())
+
+    def _set_last_export_options(self, options: ExportOptions) -> None:
+        self._last_export_options = options
 
     def _show_message(self, title: str, text: str) -> None:
         dlg = QMessageBox(self)
@@ -700,12 +646,17 @@ class HomePage(QWidget):
         return dlg.clickedButton() is yes
 
     def _build_queue_job(
-        self, destination: str, options: ExportOptions, prefer_override: Optional[str]
-    ) -> Optional[QueueJobPayload]:
-        if not self._current_path:
+        self,
+        src_path: str,
+        destination: str,
+        options: ExportOptions,
+        prefer_override: Optional[str],
+        rem_bg_enabled: bool,
+    ) -> Optional[JobRequest]:
+        if not src_path:
             return None
         diag_id = generate_diagnostic_id()
-        if self.rem_bg.isChecked() and prefer_override is None:
+        if rem_bg_enabled and prefer_override is None:
             prefer = (
                 getattr(self, "engine_box", None).currentText()
                 if hasattr(self, "engine_box")
@@ -724,7 +675,7 @@ class HomePage(QWidget):
             opts.setdefault("export", options.to_dict())
             opts.setdefault("diagnostic_id", diag_id)
             temp_path = self._temp_manager.copy_to_temp(
-                self._current_path,
+                src_path,
                 preferred_name=os.path.basename(destination),
                 persistent=True,
                 diagnostic_id=diag_id,
@@ -738,7 +689,7 @@ class HomePage(QWidget):
                 prefer=prefer or "auto",
                 destination=destination,
             )
-            return QueueJobPayload(
+            return JobRequest(
                 src=temp_path, prefer=prefer or "auto", opts=opts, diagnostic_id=diag_id
             )
 
@@ -752,7 +703,7 @@ class HomePage(QWidget):
             if range_ms[1] is not None:
                 opts["range"]["out_ms"] = range_ms[1]
         temp_path = self._temp_manager.copy_to_temp(
-            self._current_path,
+            src_path,
             preferred_name=os.path.basename(destination),
             persistent=True,
             diagnostic_id=diag_id,
@@ -766,9 +717,7 @@ class HomePage(QWidget):
             prefer=prefer,
             destination=destination,
         )
-        return QueueJobPayload(
-            src=temp_path, prefer=prefer, opts=opts, diagnostic_id=diag_id
-        )
+        return JobRequest(src=temp_path, prefer=prefer, opts=opts, diagnostic_id=diag_id)
 
     def _collect_engine_options(self, prefer: str) -> Optional[Dict[str, Any]]:
         prefer = prefer or "hsv"
@@ -811,10 +760,10 @@ class HomePage(QWidget):
         except Exception:
             return None
 
-    def _can_direct_copy(self, destination: str) -> bool:
-        if not self._current_path:
+    def _can_direct_copy(self, src_path: str, destination: str) -> bool:
+        if not src_path:
             return False
-        src_ext = os.path.splitext(self._current_path)[1].lower()
+        src_ext = os.path.splitext(src_path)[1].lower()
         dest_ext = os.path.splitext(destination)[1].lower()
         return src_ext == dest_ext and dest_ext in _EXTS
 
@@ -1147,31 +1096,26 @@ class HomePage(QWidget):
         try:
             if not self._current_path or self.left_stack.currentIndex() != 0:
                 return
-            import cv2, numpy as np
-            from core.hsv_bg import compute_alpha
-            from core.wand import compute_mask
-
-            bgr = cv2.imread(self._current_path, cv2.IMREAD_COLOR)
-            if bgr is None:
-                return
             eng = (
                 self.engine_box.currentText() if hasattr(self, "engine_box") else "hsv"
             )
-            if eng == "hsv":
-                alpha = compute_alpha(
-                    bgr,
+            seed = None
+            if eng not in ("hsv", "wand"):
+                self.toast.emit(
                     {
-                        "tol_h": int(self.s_h.value()),
-                        "tol_s": int(self.s_s.value()),
-                        "tol_v": int(self.s_v.value()),
-                        "strength": float(self.s_strength.value()) / 100.0,
-                        "erode_iter": int(self.s_erode.value()),
-                        "dilate_iter": int(self.s_dilate.value()),
-                        "feather_px": float(self.s_feather.value()),
-                        "use_guided": bool(self.cb_guided.isChecked()),
-                    },
+                        "level": "info",
+                        "title": "預覽",
+                        "message": "此引擎不支援即時預覽",
+                        "duration": 2000,
+                    }
                 )
-            elif eng == "wand":
+                return
+
+            if self._preview_source_path != self._current_path:
+                self._preview_service.set_static_source(self._current_path)
+                self._preview_source_path = self._current_path
+
+            if eng == "wand":
                 seed = getattr(self, "_wand_seed", None)
                 if not seed:
                     self.toast.emit(
@@ -1183,48 +1127,53 @@ class HomePage(QWidget):
                         }
                     )
                     return
-                alpha = compute_mask(
-                    bgr,
-                    seed,
-                    {
-                        "tolH": int(self.wand_tol.value()),
-                        "tolS": 60,
-                        "tolV": 60,
-                        "contiguous": True,
-                        "use_edge_barrier": True,
-                        "connectivity": 8,
-                    },
-                )
+                self._preview_service.update_seed(seed)
+                wand_opts = {
+                    "tolH": int(self.wand_tol.value()),
+                    "tolS": 60,
+                    "tolV": 60,
+                    "contiguous": True,
+                    "use_edge_barrier": True,
+                    "connectivity": 8,
+                }
             else:
-                self.toast.emit(
-                    {
-                        "level": "info",
-                        "title": "預覽",
-                        "message": "此引擎不支援即時預覽",
-                        "duration": 2000,
-                    }
-                )
-                return
-            # 疊色到當前預覽大小
-            ov = np.zeros((alpha.shape[0], alpha.shape[1], 4), dtype=np.uint8)
-            ov[..., 1] = 255
-            ov[..., 3] = (alpha > 0).astype(np.uint8) * 90
-            from PyQt6.QtGui import QImage, QPainter
+                self._preview_service.update_seed(None)
+                wand_opts = None
 
-            qov = QImage(
-                ov.data,
-                ov.shape[1],
-                ov.shape[0],
-                4 * ov.shape[1],
-                QImage.Format.Format_RGBA8888,
+            self._preview_service.update_hsv("tol_h", int(self.s_h.value()))
+            self._preview_service.update_hsv("tol_s", int(self.s_s.value()))
+            self._preview_service.update_hsv("tol_v", int(self.s_v.value()))
+            self._preview_service.update_hsv(
+                "strength", float(self.s_strength.value()) / 100.0
             )
+            self._preview_service.update_hsv("erode_iter", int(self.s_erode.value()))
+            self._preview_service.update_hsv("dilate_iter", int(self.s_dilate.value()))
+            self._preview_service.update_hsv("feather_px", float(self.s_feather.value()))
+            self._preview_service.update_hsv(
+                "use_guided", bool(self.cb_guided.isChecked())
+            )
+
+            frame = self._preview_service.load_current_frame_with_engine(
+                engine=eng,
+                wand_seed=seed if eng == "wand" else None,
+                wand_opts=wand_opts,
+                apply_overlay=True,
+            )
+            qov = frame.overlay
+            if qov is None:
+                return
+
+            from PyQt6.QtGui import QPainter
+
             # 以原圖為底，避免覆疊多次後失真或透明
             base = getattr(self, "_orig_pix", None)
             if base is None or base.isNull():
                 base = QPixmap(self._current_path)
                 if base.isNull():
-                    return
-                self._orig_pix = QPixmap(base)
+                    base = QPixmap.fromImage(frame.image)
+            if base.isNull():
+                return
+            self._orig_pix = QPixmap(base)
             scaled = self._scaled(base)
             qov = qov.scaled(
                 scaled.size(),
@@ -1285,9 +1234,11 @@ class HomePage(QWidget):
             self.player.play()
 
     def _ask_output(self, suffix: str):
-        base = os.path.splitext(os.path.basename(self._current_path or "output"))[0]
+        base = self._video_service.suggest_output_name(
+            self._current_path or "output", suffix
+        )
         text, ok = QInputDialog.getText(
-            self, "輸出檔名", "輸入檔名：", text=f"{base}{suffix}"
+            self, "輸出檔名", "輸入檔名：", text=base
         )
         if not ok or not text.strip():
             return None

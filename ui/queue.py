@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
+
+from core.job_models import JobRequest
 from .logger import loggerFactory
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
 
 @dataclass
-class QueueJob:
-    src: str
-    prefer: str
-    opts: Dict[str, Any]
-    diagnostic_id: Optional[str] = None
+class QueueJob(JobRequest):
+    pass
 
 
 class ProcessingQueue(QObject):
