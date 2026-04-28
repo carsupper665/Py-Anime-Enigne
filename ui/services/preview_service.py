@@ -291,7 +291,7 @@ class PreviewService:
         wand_opts: Optional[Dict[str, Any]],
     ) -> Optional[QImage]:
         if not wand_seed:
-            raise RuntimeError("魔術棒需要先在圖片上取樣（wand_seed 為空）。")
+            raise RuntimeError("魔術棒需要先在圖片上取樣，wand_seed 為空。")
         try:
             from core.wand import compute_mask
         except Exception:

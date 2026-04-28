@@ -1171,9 +1171,9 @@ class HomePage(QWidget):
                 base = QPixmap(self._current_path)
                 if base.isNull():
                     base = QPixmap.fromImage(frame.image)
-                if base.isNull():
-                    return
-                self._orig_pix = QPixmap(base)
+            if base.isNull():
+                return
+            self._orig_pix = QPixmap(base)
             scaled = self._scaled(base)
             qov = qov.scaled(
                 scaled.size(),
